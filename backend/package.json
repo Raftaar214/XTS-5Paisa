@@ -1,0 +1,23 @@
+{
+  "name": "xts-trading-backend",
+  "version": "1.1.0",
+  "description": "XTS 5paisa multi-client (parent/child) trading backend",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "socket.io-client": "^2.2.0",
+    "uuid": "^10.0.0",
+    "ws": "^8.18.0",
+    "xts-marketdata-api": "^3.0.17"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.7"
+  }
+}

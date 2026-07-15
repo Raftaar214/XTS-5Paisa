@@ -1,0 +1,9 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Force dark theme background on the root */
+body {
+  background-color: #161a1f;
+  color: #d1d5db;
+}
