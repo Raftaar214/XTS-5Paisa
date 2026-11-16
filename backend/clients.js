@@ -21,12 +21,42 @@ const DEFAULT_ROOT_URL = process.env.XTS_INTERACTIVE_URL || "https://xtsmum.5pai
 
 const clients = []; // shared array reference — always mutated in place, never reassigned
 
+// API keys / secrets at rest: when DATA_KEY is set in .env they are stored
+// encrypted (AES-256-GCM) in data/clients.json; without it, as plain text.
+// If the file holds encrypted values that cannot be decrypted (DATA_KEY
+// missing or different), the keys load as blank and the file is NEVER
+// rewritten, so nothing is lost — set the right DATA_KEY and restart.
+const crypto = require("crypto");
+const SECRET_FIELDS = ["interactiveKey", "interactiveSecret", "marketKey", "marketSecret"];
+const ENC_PREFIX = "enc:v1:";
+let secretsLocked = false;
+const dataKey = () => (process.env.DATA_KEY ? crypto.createHash("sha256").update(process.env.DATA_KEY).digest() : null);
+
+function encryptValue(v) {
+  const key = dataKey();
+  if (!key || !v || String(v).startsWith(ENC_PREFIX)) return v;
+  const iv = crypto.randomBytes(12);
+  const c = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const ct = Buffer.concat([c.update(String(v), "utf8"), c.final()]);
+  return ENC_PREFIX + [iv, c.getAuthTag(), ct].map(b => b.toString("base64")).join(":");
+}
+function decryptValue(v) {
+  if (typeof v !== "string" || !v.startsWith(ENC_PREFIX)) return v;
+  const key = dataKey();
+  if (!key) throw new Error("DATA_KEY is not set");
+  const [iv, tag, ct] = v.slice(ENC_PREFIX.length).split(":").map(s => Buffer.from(s, "base64"));
+  const d = crypto.createDecipheriv("aes-256-gcm", key, iv);
+  d.setAuthTag(tag);
+  return Buffer.concat([d.update(ct), d.final()]).toString("utf8");
+}
+
 // Persistence
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
 function persist() {
+  if (secretsLocked) throw new Error("client keys could not be decrypted (wrong or missing DATA_KEY) — not saving, so nothing is overwritten");
   ensureDataDir();
   const serializable = clients.map(c => ({
     id:                c.id,
@@ -37,10 +67,10 @@ function persist() {
     rootUrl:           c.rootUrl,
     source:            c.source,
     assignedTo:        c.assignedTo || "",
-    interactiveKey:    c.interactiveKey,
-    interactiveSecret: c.interactiveSecret,
-    marketKey:         c.marketKey    || "",
-    marketSecret:      c.marketSecret || "",
+    interactiveKey:    encryptValue(c.interactiveKey),
+    interactiveSecret: encryptValue(c.interactiveSecret),
+    marketKey:         encryptValue(c.marketKey    || ""),
+    marketSecret:      encryptValue(c.marketSecret || ""),
     enabled:           c.enabled,
   }));
   fs.writeFileSync(DATA_FILE, JSON.stringify(serializable, null, 2));
@@ -102,8 +132,24 @@ function load() {
     try {
       const raw = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
       if (Array.isArray(raw) && raw.length) {
-        replaceAll(raw.map(runtimeShape));
+        let plain = false;
+        const decoded = raw.map(c => {
+          const out = { ...c };
+          for (const f of SECRET_FIELDS) {
+            if (c[f] && !String(c[f]).startsWith(ENC_PREFIX)) plain = true;
+            try { out[f] = decryptValue(c[f]); } catch (_) { secretsLocked = true; out[f] = ""; }
+          }
+          return out;
+        });
+        replaceAll(decoded.map(runtimeShape));
         console.log(`Loaded ${clients.length} client(s) from data/clients.json`);
+        if (secretsLocked) {
+          console.error("Error: the client API keys in data/clients.json are encrypted and could not be decrypted — " +
+            "DATA_KEY in backend/.env is missing or different. Set the right DATA_KEY and restart. The file will not be changed until then.");
+        } else if (plain && dataKey()) {
+          persistQuiet();                                   // DATA_KEY set: encrypt plain keys now
+          console.log("Client API keys are now stored encrypted (DATA_KEY).");
+        }
         return;
       }
     } catch (err) {
@@ -182,6 +228,7 @@ function capitalOf(v) {
 function fail(status, message) { return Object.assign(new Error(message), { status }); }
 
 function addClient(input = {}) {
+  if (secretsLocked) throw fail(409, "Client keys could not be decrypted (wrong or missing DATA_KEY) — not saving, so nothing is overwritten. Set the right DATA_KEY in backend/.env and restart.");
   const role = String(input.role || "CHILD").toUpperCase();
   const id   = String(input.id || "").trim();
   const name = String(input.name || "").trim();
@@ -233,6 +280,7 @@ function addClient(input = {}) {
 }
 
 function updateClient(id, input = {}) {
+  if (secretsLocked) throw fail(409, "Client keys could not be decrypted (wrong or missing DATA_KEY) — not saving, so nothing is overwritten. Set the right DATA_KEY in backend/.env and restart.");
   const c = clients.find(x => x.id === id);
   if (!c) throw fail(404, "Client not found");
 
@@ -281,6 +329,7 @@ function updateClient(id, input = {}) {
 }
 
 function removeClient(id) {
+  if (secretsLocked) throw fail(409, "Client keys could not be decrypted (wrong or missing DATA_KEY) — not saving, so nothing is overwritten. Set the right DATA_KEY in backend/.env and restart.");
   const idx = clients.findIndex(x => x.id === id);
   if (idx === -1) throw fail(404, "Client not found");
   const [removed] = clients.splice(idx, 1);
@@ -292,4 +341,5 @@ module.exports = {
   clients, initClients, clientSnapshot, clientManagementView,
   getParent, hasParent, addClient, updateClient, removeClient,
   visibleTo, isVisibleTo,
+  secretsLocked: () => secretsLocked,
 };

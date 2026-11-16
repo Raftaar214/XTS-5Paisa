@@ -279,6 +279,100 @@ test("positions held to expiry are settled at 15:30", async () => {
   assert.strictEqual(store.loadRun(a.id).status, "STOPPED");
 });
 
+test("expiry with no option price settles at intrinsic value from the futures price — never at 0", async () => {
+  const a = setup();
+  at(EXPIRY, "09:15"); runner.start(a.id, "nikhil");
+  at(EXPIRY, "09:20", 1); await runner.tick();
+  const ce = open(store.loadRun(a.id)).find(p => p.type === "CE");
+  // 15:30: the options have no quote any more; the future trades 100 above the CE strike
+  for (const p of open(store.loadRun(a.id))) delete quotes[p.token];
+  quotes["99999"] = { bid: ce.strike + 100, ask: ce.strike + 100, ltp: ce.strike + 100, hasData: true };
+  at(EXPIRY, "15:30", 5); await runner.tick();
+  const settled = store.loadRun(a.id).positions.find(p => p.id === ce.id);
+  assert.strictEqual(settled.status, "EXPIRED");
+  assert.strictEqual(settled.exitPrice, 100, "CE settled at F - K");
+  assert.ok(journal.read("events", EXPIRY, e => e.assignmentId === a.id).some(e => /intrinsic value from the futures price/.test(e.message)));
+  runner.stop(a.id, "nikhil"); await runner.tick();
+  priceQuotes(EXPIRY);
+});
+
+test("with no price at all, an expired position stays open (and is reported) instead of settling at 0", async () => {
+  const a = setup();
+  at(EXPIRY, "09:15"); runner.start(a.id, "nikhil");
+  at(EXPIRY, "09:20", 1); await runner.tick();
+  const run = store.loadRun(a.id);
+  for (const p of open(run)) { delete quotes[p.token]; delete p.lastPrice; }
+  delete quotes["99999"];
+  at(EXPIRY, "15:30", 5); await runner.tick();
+  assert.strictEqual(open(store.loadRun(a.id)).length, 4, "nothing settled without a price");
+  assert.ok(journal.read("events", EXPIRY, e => e.assignmentId === a.id).some(e => /Cannot settle/.test(e.message)));
+  priceQuotes(EXPIRY);
+  at(EXPIRY, "15:31"); await runner.tick();
+  assert.strictEqual(open(store.loadRun(a.id)).length, 0, "settled once prices are back");
+  runner.stop(a.id, "nikhil"); await runner.tick();
+});
+
+test("if one leg of an entry fails, the filled legs are closed at once (no one-sided position)", async () => {
+  const a = setup({ mode: "LIVE" });
+  let first = true;
+  liveResult = (legs, cls) => cls.flatMap(c => legs.map((l, i) => {
+    const ok = !(first && l.side === "Sell" && i === 1);           // the 2nd leg of the first entry is rejected
+    return ok
+      ? { client: c.id, token: String(l.exchange_token), status: "FILLED", filledQty: l.lots * l.lot_size * (c.multiplier || 1), requestedQty: l.lots * l.lot_size * (c.multiplier || 1), avgPrice: 40, orderId: "A1" }
+      : { client: c.id, token: String(l.exchange_token), status: "FAILED", filledQty: 0, requestedQty: l.lots * l.lot_size, error: "RMS: margin shortfall" };
+  }));
+  at(EXPIRY, "09:15"); runner.start(a.id, "nikhil");
+  at(EXPIRY, "09:20", 1); await runner.tick();
+  first = false;
+  const run = store.loadRun(a.id);
+  assert.strictEqual(open(run).length, 0, "nothing left open");
+  assert.ok(run.positions.length > 0 && run.positions.every(p => p.exitReason === "UNWIND"));
+  assert.ok(liveCalls.some(c => c.legs.every(l => l.side === "Buy")), "the filled short legs were bought back");
+  assert.ok(journal.read("events", EXPIRY, e => e.assignmentId === a.id).some(e => /entry incomplete/.test(e.message)));
+  runner.stop(a.id, "nikhil"); await runner.tick();
+});
+
+test("an entry is skipped when any leg's price is old (feed stalled for that contract)", async () => {
+  runner = createRunner({ ...deps(), isFresh: () => false });
+  const a = setup();
+  at(EXPIRY, "09:15"); runner.start(a.id, "nikhil");
+  at(EXPIRY, "09:20", 1); await runner.tick();
+  assert.strictEqual(open(store.loadRun(a.id)).length, 0);
+  assert.ok(journal.read("events", EXPIRY, e => e.assignmentId === a.id).some(e => /is old — whole entry skipped/.test(e.message)));
+  runner.stop(a.id, "nikhil"); await runner.tick();
+});
+
+test("a stop uses the live bid/ask mid when the last trade is outside it (old print)", async () => {
+  const a = setup();
+  at(EXPIRY, "09:15"); runner.start(a.id, "nikhil");
+  at(EXPIRY, "09:20", 1); await runner.tick();
+  const pos = open(store.loadRun(a.id)).find(p => p.side === "SELL");
+  const e = pos.entryPrice;
+  // an odd trade printed at 3x, but the book is still around the entry price: no stop
+  quotes[pos.token] = { bid: e - 0.1, ask: e + 0.1, ltp: e * 3, hasData: true };
+  at(EXPIRY, "09:21"); await runner.tick();
+  assert.ok(open(store.loadRun(a.id)).some(p => p.id === pos.id), "not stopped on an old print");
+  // the book itself moves above the stop: stopped
+  quotes[pos.token] = { bid: e * 2.1, ask: e * 2.2, ltp: e * 2.15, hasData: true };
+  at(EXPIRY, "09:22"); await runner.tick();
+  assert.strictEqual(store.loadRun(a.id).positions.find(p => p.id === pos.id).exitReason, "STOP");
+  runner.squareOff(a.id, "nikhil"); await runner.tick();
+  priceQuotes(EXPIRY);
+});
+
+test("exchange holidays: no trading that day, and they do not count as trading days", async () => {
+  assert.strictEqual(ist.tradingDaysBetween("2026-11-13", "2026-11-17"), 2);
+  assert.strictEqual(ist.tradingDaysBetween("2026-11-13", "2026-11-17", ["2026-11-16"]), 1);
+  assert.strictEqual(ist.isTradingDay("2026-11-16", ["2026-11-16"]), false);
+  settings.holidays = [EXPIRY];
+  const a = setup();
+  at(EXPIRY, "09:15"); runner.start(a.id, "nikhil");
+  at(EXPIRY, "09:20", 1); await runner.tick();
+  assert.strictEqual(open(store.loadRun(a.id)).length, 0, "market closed on a holiday");
+  settings.holidays = [];
+  runner.stop(a.id, "nikhil"); await runner.tick();
+});
+
 test("after a restart the runner resumes: no duplicate entries, stops still watched", async () => {
   const a = setup();
   at(EXPIRY, "09:15"); runner.start(a.id, "nikhil");

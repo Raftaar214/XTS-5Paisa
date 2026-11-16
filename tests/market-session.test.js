@@ -22,6 +22,8 @@ const EventEmitter = require("events");
 process.env.XTS_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "xts-mdsession-"));
 process.env.MARKET_TAKEOVER_BACKOFF_MS = "10";
 process.env.MARKET_RELOGIN_BASE_MS = "5";
+process.env.MARKET_RETRY_MS = "20";
+process.env.MARKET_SUB_RETRY_MS = "20";
 
 function mockModule(request, exports, from = BACKEND) {
   const file = require.resolve(request, { paths: [from] });
@@ -30,7 +32,7 @@ function mockModule(request, exports, from = BACKEND) {
 }
 
 // fake broker
-const broker = { logins: 0, token: null, calls: [], invalid: false };
+const broker = { logins: 0, token: null, calls: [], invalid: false, loginFails: 0, subFails: 0 };
 const sockets = [];
 function fakeIo(url, opts) {
   const s = new EventEmitter();
@@ -43,6 +45,10 @@ function fakeIo(url, opts) {
 }
 const fakeAxios = async cfg => {
   broker.calls.push({ method: cfg.method, tokens: cfg.data.instruments.map(i => String(i.exchangeInstrumentID)), auth: cfg.headers.Authorization });
+  if (cfg.method === "post" && broker.subFails > 0) {
+    broker.subFails--;
+    throw Object.assign(new Error("500"), { response: { status: 500, data: { type: "error", description: "Server busy" } } });
+  }
   if (broker.invalid || cfg.headers.Authorization !== broker.token) {
     throw Object.assign(new Error("400"), { response: { status: 400, data: { type: "error", code: "e-session-0007", description: "Invalid Token" } } });
   }
@@ -50,6 +56,7 @@ const fakeAxios = async cfg => {
     ExchangeInstrumentID: i.exchangeInstrumentID, Touchline: { BidInfo: { Price: 10 }, AskInfo: { Price: 11 }, LastTradedPrice: 10.5 } })) : [] } } };
 };
 fakeAxios.post = async () => {
+  if (broker.loginFails > 0) { broker.loginFails--; throw Object.assign(new Error("network down"), { code: "ECONNRESET" }); }
   broker.logins++;
   broker.invalid = false;
   broker.token = `T${broker.logins}`;
@@ -132,4 +139,62 @@ test("a token still needed by another owner stays subscribed", async () => {
   await md.subscribeTokens(["101"], ["NSE_FO"], "strategy:x");
   await md.unsubscribeTokens(["101"], "ui:a");
   assert.ok(md.getLivePrices()["101"], "strategy still needs it");
+});
+
+test("an unchanged tick still marks the price as fresh, and carries the size at the best price", async () => {
+  const tick = () => sockets.at(-1).emit("1501-json-full", JSON.stringify({ ExchangeInstrumentID: 101,
+    Touchline: { BidInfo: { Price: 12, Size: 300 }, AskInfo: { Price: 12.5, Size: 150 }, LastTradedPrice: 12.2 } }));
+  tick();
+  const q = md.getLivePrices()["101"];
+  assert.strictEqual(q.bidQty, 300);
+  assert.strictEqual(q.askQty, 150);
+  q.seen = Date.now() - 120_000;                       // pretend nothing came for 2 minutes
+  assert.strictEqual(md.isFresh("101", 60_000), false);
+  tick();                                              // same price again
+  assert.strictEqual(md.isFresh("101", 60_000), true, "seen again, even though nothing changed");
+  assert.strictEqual(md.isFresh("999", 60_000), false, "never seen");
+});
+
+test("a subscribe call that fails for a non-session reason is retried until it works", async () => {
+  broker.subFails = 2;
+  await md.subscribeTokens(["104"], ["NSE_FO"], "ui:a");
+  assert.ok(!md.getLivePrices()["104"], "first call failed");
+  assert.ok(md.getMarketStatus().pendingSubscriptions >= 1);
+  await wait(120);
+  assert.strictEqual(md.getLivePrices()["104"]?.ask, 11, "subscribed by the retry");
+  assert.strictEqual(md.getMarketStatus().pendingSubscriptions, 0);
+});
+
+test("when every login attempt fails, it keeps retrying until the broker is back", async () => {
+  broker.loginFails = 9;                               // more than one full round of 6 attempts
+  broker.invalid = true;
+  const logins = broker.logins;
+  sockets.at(-1).emit("disconnect", "io server disconnect");
+  await wait(400);
+  assert.ok(broker.loginFails === 0, "all failing attempts were used");
+  assert.ok(broker.logins > logins, "a later retry logged in");
+  await wait(60);
+  assert.strictEqual(md.getMarketStatus().joined, true);
+  assert.strictEqual(md.getMarketStatus().retryingLogin, false);
+});
+
+test("start-up login failure is retried too (no manual restart needed)", async () => {
+  broker.loginFails = 2;                               // both login sources fail once
+  const logins = broker.logins;
+  const ok = await md.startMarketData();
+  assert.strictEqual(ok, false);
+  assert.strictEqual(md.getMarketStatus().retryingLogin, true);
+  await wait(120);
+  assert.ok(broker.logins > logins);
+  assert.strictEqual(md.getMarketStatus().joined, true);
+});
+
+test("repeated take-overs back off longer each time", async () => {
+  const level = md.getMarketStatus().takeoverLevel;
+  for (let i = 0; i < 2; i++) {
+    broker.invalid = true;
+    sockets.at(-1).emit("disconnect", "io server disconnect");
+    await wait(250);
+  }
+  assert.ok(md.getMarketStatus().takeoverLevel >= level + 2, "the back-off step went up");
 });

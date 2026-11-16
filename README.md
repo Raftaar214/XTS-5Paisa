@@ -284,6 +284,8 @@ Press **Ctrl+Shift+Space** anywhere in the app (login screen or dashboard) and l
   - **Segments allowed for trading** and the product type per segment (NRML / MIS / CNC; equity defaults to CNC). Disallowed segments disappear from the dashboard and are refused by the server and the strategy runner.
   - **Lot sizing per client**: by each client's multiplier, or by capital (client capital / base capital, e.g. base ₹1 Cr: ₹2 Cr -> 2x, ₹1.5 Cr -> 1.5x). Fractions round down by default (never more than the ratio), or to the nearest lot. A client whose size rounds to 0 lots is skipped and logged.
   - The trading kill switch, engine parameters (price buffer, fill timeout, retries, poll interval, cancel wait, order gap) and risk limits (max legs, lots per leg, quantity per order, order value, clients per execution, orders per minute). Limits are checked on the server before any order reaches the broker.
+  - **Market holidays**: one date per line. Strategies do not trade on them, and they are not counted as trading days for DTE.
+  - **Scheduled login**: on trading days, log in and connect every enabled client at a set IST time (off by default). A broker session login only — it never places an order.
 
 A new install starts in **PAPER** with **trading halted**. LIVE orders need both: mode set to LIVE and trading resumed.
 
@@ -324,6 +326,26 @@ Each client card has **Algo Pos** (that client's PAPER strategy positions with e
 ### Order safety
 
 Every broker request passes a per-client guard: orders for one client go out one at a time at least 110 ms apart (Admin -> Execution & Limits -> order gap, or `ORDER_MIN_GAP_MS`; the broker allows 10 orders/s), different clients in parallel, status polls at least 100 ms apart (`ORDER_POLL_GAP_MS`), and more than **Max orders per minute, per client** (Admin -> Execution & Limits, default 60) is refused before reaching the broker and pauses every strategy using that client.
+
+## Reliability and Safety
+
+What the system does by itself when something goes wrong during market hours:
+
+| Situation | What happens |
+|---|---|
+| Market-data login fails (at start-up or later) | Retries after 30 s, then every 60 s, until the broker answers. The admin monitor shows "retrying". |
+| Another program uses the same Market Data key | Each take-over waits longer before logging in again: 30 s, 60 s, 2 min, 5 min. |
+| A subscription request fails | The contract is subscribed again every 30 s until it works. |
+| A contract's price is older than 60 s | No entry, no PAPER fill and no LIVE order on that price; stops use the last good mark. |
+| An option's last trade is outside the live bid/ask | Stops and P&L use the bid/ask mid instead (an old print on an illiquid strike). |
+| One leg of a strategy entry fills and another does not | The filled legs of that client are closed at once, so nothing is left unhedged (logged as UNWIND). |
+| An option expires with no price | Settled at intrinsic value from the futures price; if there is no price at all it stays open, is reported, and is settled once a price comes back — never at ₹0. |
+| The broker ends a client's trading session (invalid token, logout) | One automatic re-login (at most once a minute). If it fails, the client is shown as logged out. |
+| The server hits an unexpected error | A stray async error is logged and the server keeps running; a real crash exits and `start.bat` / `start.sh` start it again after 5 s. Clients that were logged in that day log in again by themselves. |
+| After any login or restart | A read-only broker check warns (admin Monitor, "Broker sessions and checks") about filled orders the app has no record of, and LIVE positions the broker does not show. It never places an order. |
+| PAPER fills | Only up to the size shown at the best bid/ask; the rest waits, times out and is retried like LIVE. |
+
+Order tags (`orderUniqueIdentifier`) are 16 characters, inside the broker's limit.
 
 ## Parent and Child Client Setup
 
@@ -406,6 +428,9 @@ See [XTS_API_REFERENCE.md](./XTS_API_REFERENCE.md) for backend routes, request e
 - The backend serves the built dashboard itself (`frontend/dist`, or `FRONTEND_DIST`). If the dashboard is served from elsewhere, set `VITE_API_URL` and `VITE_WS_URL` in `frontend/.env` before building.
 - Use HTTPS and WSS behind a reverse proxy for internet-facing deployments (proxy `/ws` as a WebSocket).
 - Use only one running copy per Market Data key — a second copy (or another app on the same key) keeps kicking this one's market session.
+- Set `DATA_KEY` in `backend/.env` to store the client API keys encrypted in `data/clients.json`. Keep it safe: without it the stored keys cannot be read (the app then refuses to overwrite the file, and the keys must be entered again).
+- Set `TLS_CERT` / `TLS_KEY` (PEM file paths) to serve the dashboard over HTTPS directly, or put a reverse proxy in front.
+- Keep the PC awake during market hours (Windows: `powercfg /change standby-timeout-ac 0`); a sleeping PC stops the server.
 
 ## References
 

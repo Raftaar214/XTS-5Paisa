@@ -84,6 +84,14 @@ const DEAD_STATES   = ["CANCELLED", "CANCELED", "EXPIRED", "REJECTED"];
 // Helpers
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// Order tag (orderUniqueIdentifier): "M" + time (base 36) + random, 16
+// characters — short enough for any broker limit, unique per order.
+function orderTag() {
+  const t = Date.now().toString(36).toUpperCase();                 // 8-9 chars
+  const r = uuidv4().replace(/-/g, "").toUpperCase();
+  return ("M" + t + r).slice(0, 16);
+}
+
 /**
  * Round to nearest tick (mirrors _round_to_tick in Python).
  * BUY  -> CEIL  so we never undershoot the ask.
@@ -189,6 +197,7 @@ async function executeOneLeg(client, leg, cfg, api) {
   const cancelTimeoutMs = Number(cfg.cancelTimeout ?? 5)   * 1000;
   const retryDelayMs    = Number(cfg.retryDelay    ?? 2)   * 1000;
   const limits          = cfg.limits || {};
+  const maxQuoteAgeMs   = Number(cfg.maxQuoteAgeMs ?? 60_000);
 
   const token   = leg.exchange_token?.toString();
   const lots    = parseInt(leg.lots || leg.quantity || 1);
@@ -347,6 +356,14 @@ async function executeOneLeg(client, leg, cfg, api) {
       result.attempts.push({ attempt, error: msg, status: "FAILED" });
       break;
     }
+    // Never price an order off an old quote (feed stalled for this contract).
+    const quoteAgeMs = q.seen ? Date.now() - Number(q.seen) : 0;
+    if (quoteAgeMs > maxQuoteAgeMs) {
+      const msg = `Price for ${label} is ${Math.round(quoteAgeMs / 1000)} s old — no order sent`;
+      console.warn(`[MLO] ${client.id} | ${msg}`);
+      result.attempts.push({ attempt, error: msg, status: "FAILED" });
+      return finish(totalFilled > 0 ? "PARTIAL" : "FAILED", msg);
+    }
 
     // Step 2 — marketable limit price
     let lmt;
@@ -378,7 +395,7 @@ async function executeOneLeg(client, leg, cfg, api) {
     // Step 4 — place LIMIT order
     let appOrderId;
     let ackAt = null;
-    const orderUID = `MLO_${Date.now()}_${uuidv4().slice(0, 6)}`;
+    const orderUID = orderTag();
     const placeAt = Date.now();
     if (firstPlaceAt === null) firstPlaceAt = placeAt;
     pushedSince = placeAt - 1;
@@ -576,4 +593,4 @@ async function executeOrderMulti(legs, activeClients, cfg = DEFAULT_CFG, api = g
   return allResults;
 }
 
-module.exports = { executeOrderMulti, STRATEGY_PRESETS, DEFAULT_CFG };
+module.exports = { executeOrderMulti, STRATEGY_PRESETS, DEFAULT_CFG, orderTag };

@@ -60,16 +60,24 @@ function isWeekend(date) {
   return wd === 0 || wd === 6;
 }
 
-// Trading days from `from` to `to` (weekends skipped). 0 = same day,
-// 1 = the next trading day, … Negative when `to` is already past.
-// Exchange holidays are not known here; expiry dates themselves come from
-// the instrument master, which already reflects holiday shifts.
-function tradingDaysBetween(from, to) {
+// Exchange holidays: a list of "YYYY-MM-DD" set by the admin
+// (Admin -> Execution & Limits). Expiry dates themselves come from the
+// instrument master, which already reflects holiday shifts.
+const holidaySet = holidays => (holidays instanceof Set ? holidays : new Set(holidays || []));
+
+function isTradingDay(date, holidays) {
+  return !isWeekend(date) && !holidaySet(holidays).has(date);
+}
+
+// Trading days from `from` to `to` (weekends and holidays skipped).
+// 0 = same day, 1 = the next trading day, … Negative when `to` is past.
+function tradingDaysBetween(from, to, holidays) {
   if (to === from) return 0;
   if (to < from) return -1;
+  const h = holidaySet(holidays);
   let n = 0;
   for (let d = addDays(from, 1); d <= to; d = addDays(d, 1)) {
-    if (!isWeekend(d)) n++;
+    if (!isWeekend(d) && !h.has(d)) n++;
   }
   return n;
 }
@@ -79,5 +87,5 @@ const MARKET_CLOSE = 15 * 60 + 30;
 
 module.exports = {
   IST_OFFSET_MS, parts, dateOf, toMinutes, fromMinutes, timeOn, addDays,
-  isWeekend, tradingDaysBetween, MARKET_OPEN, MARKET_CLOSE,
+  isWeekend, isTradingDay, tradingDaysBetween, MARKET_OPEN, MARKET_CLOSE,
 };

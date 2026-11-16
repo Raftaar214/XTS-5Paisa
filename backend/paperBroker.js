@@ -5,10 +5,13 @@
 // through exactly the same marketable-limit logic as LIVE: price buffer, fill
 // timeout, cancel, retry of the unfilled remainder, MANUAL_CHECK rules.
 //
-// Fill model: an open order fills in full as soon as the LIVE quote crosses
-// its limit — a SELL when bid >= limit (at the bid), a BUY when ask <= limit
-// (at the ask). Quotes come from the broker's live market-data feed. Market
-// depth is not simulated, so there are no partial fills.
+// Fill model: an open order fills as soon as the LIVE quote crosses its
+// limit — a SELL when bid >= limit (at the bid), a BUY when ask <= limit (at
+// the ask) — but only up to the size shown at that best price (bidQty /
+// askQty from the feed). The rest waits for the next quote update, so a big
+// order fills in parts, times out and is cancelled / retried like LIVE.
+// A quote the broker has not sent for maxQuoteAgeMs (60 s) never fills
+// anything: PAPER does not trade on old prices.
 //
 // Nothing here talks to any broker. Order IDs are PAPER-YYYYMMDD-XXXXXX.
 
@@ -20,7 +23,7 @@ const KEEP_MS = 6 * 3600_000;
 const rejection = message =>
   Object.assign(new Error(message), { response: { status: 400, data: { type: "error", description: message } } });
 
-function createPaperBroker({ getQuotes, now = Date.now }) {
+function createPaperBroker({ getQuotes, now = Date.now, maxQuoteAgeMs = 60_000 }) {
   const orders = new Map();
 
   const newId = () =>
@@ -35,17 +38,26 @@ function createPaperBroker({ getQuotes, now = Date.now }) {
   });
   const snap = o => { o.updatedAt = Date.now(); o.history.push(publicView(o)); };
 
+  const isOpen = o => o.OrderStatus === "New" || o.OrderStatus === "PartiallyFilled";
+
   function evaluate(o) {
-    if (o.OrderStatus !== "New") return;
+    if (!isOpen(o)) return;
     const q = (getQuotes() || {})[o.token] || {};
-    let px = 0;
-    if (o.side === "SELL") { const bid = Number(q.bid || 0); if (bid > 0 && bid >= o.limit) px = bid; }
-    else                   { const ask = Number(q.ask || 0); if (ask > 0 && ask <= o.limit) px = ask; }
+    const seen = Number(q.seen || q.ts || 0);
+    if (seen && now() - seen > maxQuoteAgeMs) return;          // old price: no fill
+    if (seen && o.lastQuoteSeen === seen) return;              // this quote's size was already taken
+    let px = 0, size = null;
+    if (o.side === "SELL") { const bid = Number(q.bid || 0); if (bid > 0 && bid >= o.limit) { px = bid; size = q.bidQty; } }
+    else                   { const ask = Number(q.ask || 0); if (ask > 0 && ask <= o.limit) { px = ask; size = q.askQty; } }
     if (!px) return;
-    o.OrderStatus = "Filled";
-    o.CumulativeQuantity = o.qty;
-    o.LeavesQuantity = 0;
-    o.OrderAverageTradedPrice = px;
+    const left = o.qty - o.CumulativeQuantity;
+    const avail = Number(size) > 0 ? Number(size) : left;      // size unknown: assume enough
+    const fill = Math.min(left, avail);
+    o.lastQuoteSeen = seen || null;
+    o.OrderAverageTradedPrice = (o.OrderAverageTradedPrice * o.CumulativeQuantity + px * fill) / (o.CumulativeQuantity + fill);
+    o.CumulativeQuantity += fill;
+    o.LeavesQuantity = o.qty - o.CumulativeQuantity;
+    o.OrderStatus = o.LeavesQuantity > 0 ? "PartiallyFilled" : "Filled";
     snap(o);
   }
 
@@ -103,8 +115,9 @@ function createPaperBroker({ getQuotes, now = Date.now }) {
       const o = orders.get(String(appOrderId));
       if (!o) throw rejection(`Unknown order ${appOrderId}`);
       evaluate(o); // it may have just filled
-      if (o.OrderStatus !== "New") throw rejection(`Order ${appOrderId} is already ${o.OrderStatus}`);
-      o.OrderStatus = "Cancelled";
+      if (!isOpen(o)) throw rejection(`Order ${appOrderId} is already ${o.OrderStatus}`);
+      o.OrderStatus = "Cancelled";                 // keeps any part already filled
+      o.LeavesQuantity = 0;
       snap(o);
       return {};
     },

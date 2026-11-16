@@ -89,6 +89,51 @@ test("a marketable paper order is seen as filled at once, not on the next 1 s po
   assert.ok(Date.now() - t < 300, `took ${Date.now() - t} ms`);
 });
 
+test("PAPER fills only the size shown at the best price; the rest waits like a real book", async () => {
+  // 75 to sell, only 25 bid at 40, and no new quote arrives: 25 + 25 (retry) = 50
+  const quotes = { "777": { bid: 40, ask: 40.2, ltp: 40.1, bidQty: 25, askQty: 25, seen: Date.now() } };
+  const paper = createPaperBroker({ getQuotes: () => quotes });
+  const [r] = await executeOrderMulti([leg("Sell")], [CLIENT], { ...CFG, getQuotes: () => quotes }, paper.api);
+  assert.strictEqual(r.status, "PARTIAL", JSON.stringify(r.attempts));
+  assert.strictEqual(r.filledQty, 50);
+  assert.strictEqual(r.avgPrice, 40);
+});
+
+test("with fresh quotes arriving, the full size fills across several prints", async () => {
+  const quotes = { "777": { bid: 40, ask: 40.2, ltp: 40.1, bidQty: 30, askQty: 30, seen: Date.now() } };
+  const ticker = setInterval(() => { quotes["777"] = { ...quotes["777"], seen: Date.now() + Math.random() }; }, 15);
+  try {
+    const paper = createPaperBroker({ getQuotes: () => quotes });
+    const [r] = await executeOrderMulti([leg("Sell")], [CLIENT], { ...CFG, fillTimeout: 1, getQuotes: () => quotes }, paper.api);
+    assert.strictEqual(r.status, "FILLED", JSON.stringify(r.attempts));
+    assert.strictEqual(r.filledQty, 75);
+  } finally { clearInterval(ticker); }
+});
+
+test("an old quote (not sent for over 60 s) is never traded on — no order is sent", async () => {
+  const quotes = { "777": { bid: 40, ask: 40.2, ltp: 40.1, seen: Date.now() - 120_000 } };
+  const paper = createPaperBroker({ getQuotes: () => quotes });
+  const [r] = await executeOrderMulti([leg("Sell")], [CLIENT], { ...CFG, getQuotes: () => quotes }, paper.api);
+  assert.strictEqual(r.status, "FAILED");
+  assert.match(r.error, /s old — no order sent/);
+  assert.strictEqual(paper.orders().length, 0);
+});
+
+test("the paper broker itself does not fill on an old quote", async () => {
+  const quotes = { "777": { bid: 40, ask: 40.2, ltp: 40.1, seen: Date.now() - 120_000 } };
+  const paper = createPaperBroker({ getQuotes: () => quotes });
+  const { AppOrderID } = await paper.api.placeOrder(CLIENT, { exchangeInstrumentID: 777, orderSide: "SELL", orderQuantity: 75, limitPrice: 39 });
+  const [h] = (await paper.api.getOrderHistory(CLIENT, AppOrderID)).slice(-1);
+  assert.strictEqual(h.OrderStatus, "New");
+});
+
+test("order tags fit the broker's 20-character limit and are unique", () => {
+  const { orderTag } = require(BACKEND + "/index");
+  const tags = new Set();
+  for (let i = 0; i < 500; i++) { const t = orderTag(); assert.ok(t.length <= 20 && /^[A-Z0-9]+$/.test(t), t); tags.add(t); }
+  assert.strictEqual(tags.size, 500);
+});
+
 test("paper order IDs are unique", async () => {
   const { run } = setup({ bid: 40, ask: 40.2, ltp: 40.1 });
   const ids = new Set();

@@ -184,7 +184,10 @@ function Monitor() {
           value={market.takeoverSuspected ? "Session taken over" : !market.loggedIn ? "Not logged in" : market.socketConnected ? (market.joined ? "Live ticks" : "Joining…") : "Socket down"}
           sub={market.takeoverSuspected
             ? "Another login is using the same Market Data key — stop the other copy/app"
-            : `${market.subscribedTokens} token(s) · ${market.ticksLastMinute ?? 0} ticks/min · last ${fmtAge(tickAge)}`} />
+            : market.retryingLogin
+              ? "Login failed — retrying by itself every 30-60 s"
+              : `${market.subscribedTokens} token(s) · ${market.ticksLastMinute ?? 0} ticks/min · last ${fmtAge(tickAge)}` +
+                (market.pendingSubscriptions ? ` · ${market.pendingSubscriptions} waiting to subscribe` : "")} />
         <Stat label="Instruments" value={instruments.count.toLocaleString()}
           tone={instruments.lastError ? "text-amber-400" : "text-gray-100"}
           sub={instruments.lastError ? `Last refresh failed: ${instruments.lastError}` : `${instruments.source || "—"} · ${fmtTime(instruments.fetchedAt)}`} />
@@ -238,6 +241,29 @@ function Monitor() {
             ))}
           </tbody>
         </table>
+      </div>
+
+      <div className="bg-[#1e2329] border border-gray-700 rounded">
+        <div className="px-3 py-1.5 border-b border-gray-700 text-[11px] font-bold text-gray-200">
+          Broker sessions and checks <span className="font-normal text-gray-500">— automatic re-logins, broker check after login (read-only)</span>
+        </div>
+        {(data.brokerEvents || []).length === 0 ? (
+          <div className="text-gray-500 text-[11px] px-3 py-2">Nothing to report.</div>
+        ) : (
+          <div className="max-h-[180px] overflow-y-auto">
+            <table className="w-full text-left text-[11px]">
+              <tbody>
+                {[...data.brokerEvents].reverse().map((e, i) => (
+                  <tr key={i} className="border-t border-gray-800 align-top">
+                    <td className="px-2 py-1 text-gray-500 whitespace-nowrap">{fmtTime(e.at)}</td>
+                    <td className="px-2 py-1 text-gray-300 whitespace-nowrap">{e.client}</td>
+                    <td className={`px-2 py-1 ${e.level === "error" ? "text-red-400" : e.level === "warn" ? "text-amber-300" : "text-gray-300"}`}>{e.message}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       <div className="bg-[#1e2329] border border-gray-700 rounded">
@@ -435,7 +461,55 @@ function TradingSetup({ s, save, saving }) {
           <div className="text-[9px] text-gray-500 mt-2">Strategies can also allocate capital per client (Strategies > assignment > Allocations).</div>
         </div>
       </div>
+
+      <CalendarAndLogin s={s} save={save} saving={saving} />
     </>
+  );
+}
+
+// Exchange holidays (market closed, not counted as trading days) and the
+// scheduled broker login (session login only — never an order).
+function CalendarAndLogin({ s, save, saving }) {
+  const [days, setDays] = useState((s.holidays || []).join("\n"));
+  const [al, setAl] = useState(s.autoLogin || { enabled: false, time: "09:00" });
+  useEffect(() => setDays((s.holidays || []).join("\n")), [s.holidays]);
+  useEffect(() => setAl(s.autoLogin || { enabled: false, time: "09:00" }), [s.autoLogin]);
+  const list = days.split(/[\s,]+/).map(x => x.trim()).filter(Boolean);
+  const daysDirty = JSON.stringify([...new Set(list)].sort()) !== JSON.stringify(s.holidays || []);
+  const alDirty = JSON.stringify(al) !== JSON.stringify(s.autoLogin || {});
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <div className="bg-[#1e2329] border border-gray-700 rounded px-3 py-3">
+        <div className="text-[11px] font-bold text-gray-200 mb-1">Market holidays</div>
+        <div className="text-[10px] text-gray-500 mb-1.5">
+          One date per line (YYYY-MM-DD). On these days strategies do not trade, and the days are not counted as trading days for DTE. Weekends are already handled.
+        </div>
+        <textarea rows={5} value={days} onChange={e => setDays(e.target.value)} placeholder="2026-11-24"
+          className={`${inputCls} font-mono`} />
+        <button disabled={!daysDirty || saving} onClick={() => save({ holidays: [...new Set(list)] })}
+          className="mt-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-[11px] font-semibold px-3 py-1 rounded-sm">
+          Save holidays
+        </button>
+      </div>
+
+      <div className="bg-[#1e2329] border border-gray-700 rounded px-3 py-3">
+        <div className="text-[11px] font-bold text-gray-200 mb-1">Scheduled login</div>
+        <div className="text-[10px] text-gray-500 mb-2">
+          On trading days, log in and connect every enabled client at this time (IST), so LIVE strategies can trade without anyone pressing Login All. This is a broker session login only — it never places an order.
+        </div>
+        <label className="flex items-center gap-2 text-[11px] text-gray-300 mb-2">
+          <input type="checkbox" checked={!!al.enabled} onChange={e => setAl(x => ({ ...x, enabled: e.target.checked }))} className="accent-emerald-500" />
+          Log in all enabled clients every trading day
+        </label>
+        <div className="text-[10px] text-gray-500 mb-0.5">Time (IST)</div>
+        <input type="time" value={al.time} onChange={e => setAl(x => ({ ...x, time: e.target.value }))} className={`${inputCls} max-w-[140px]`} />
+        <button disabled={!alDirty || saving} onClick={() => save({ autoLogin: al })}
+          className="mt-2 block bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-[11px] font-semibold px-3 py-1 rounded-sm">
+          Save scheduled login
+        </button>
+      </div>
+    </div>
   );
 }
 

@@ -45,6 +45,12 @@ if [ -n "$CHECK_ONLY" ]; then
   exit 0
 fi
 
-echo "Starting the backend. Press Ctrl+C to stop."
+echo "Starting the backend. If it stops for any reason it starts again by itself. Press Ctrl+C to stop."
 cd backend
-exec node server.js
+trap 'echo; echo "Stopped."; exit 0' INT TERM
+while true; do
+  code=0
+  node server.js || code=$?
+  echo "The server stopped (exit code $code). Starting it again in 5 seconds - press Ctrl+C to stop."
+  sleep 5
+done

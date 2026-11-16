@@ -27,6 +27,7 @@ const EXIT_RETRY_MS   = 30_000;
 const PRUNE_DAYS      = 7;
 
 const round2 = x => Math.round(x * 100) / 100;
+const QUOTE_MAX_AGE_MS = 60_000; // older prices are not traded on
 const FILLED = ["FILLED", "PARTIAL"];
 
 function createRunner(deps) {
@@ -34,6 +35,8 @@ function createRunner(deps) {
     store, journal, now = Date.now,
     getInstruments, getQuotes, subscribe, unsubscribe,
     clientsFor, executeLegs, executePaperLegs, getSettings, marketHealthy = () => true,
+    // Was this token's quote sent by the broker within maxAgeMs? (Marketsocket.isFresh)
+    isFresh = () => true,
     // Client sizing outside any strategy allocation (server: multiplier or capital / base).
     clientFactor = c => (Number(c.multiplier) > 0 ? Number(c.multiplier) : 1),
   } = deps;
@@ -66,6 +69,19 @@ function createRunner(deps) {
   }
 
   function instruments() { return getInstruments() || []; }
+  const holidays = () => (getSettings() || {}).holidays || [];
+
+  // Mark price of an option for stops and P&L: the last traded price, unless
+  // it is outside the live bid/ask (an old trade on an illiquid strike) —
+  // then the mid. Old quotes (not sent for 60 s) give no mark.
+  function markOf(quotes, token) {
+    const q = quotes[token];
+    if (!q || !isFresh(token, QUOTE_MAX_AGE_MS)) return 0;
+    const ltp = Number(q.ltp || 0), bid = Number(q.bid || 0), ask = Number(q.ask || 0);
+    const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
+    if (ltp > 0 && (!mid || (ltp >= bid && ltp <= ask))) return ltp;
+    return mid || ltp;
+  }
 
   function expiriesFor(sym, fromDate) {
     const ins = instruments();
@@ -86,8 +102,8 @@ function createRunner(deps) {
   function planFor(spec, sym, date) {
     const expiry = chainLib.pickExpiry(expiriesFor(sym, date), spec.expiryWhich);
     if (!expiry) return { sym, expiry: null, dte: null, entryDay: false };
-    const dte = ist.tradingDaysBetween(date, expiry);
-    return { sym, expiry, dte, entryDay: !ist.isWeekend(date) && spec.entryDte.includes(dte) };
+    const dte = ist.tradingDaysBetween(date, expiry, holidays());
+    return { sym, expiry, dte, entryDay: ist.isTradingDay(date, holidays()) && spec.entryDte.includes(dte) };
   }
 
   const isOpen = p => p.status === "OPEN";
@@ -139,7 +155,11 @@ function createRunner(deps) {
     }, now());
   }
 
-  function closePosition(a, s, run, p, price, reason, orderId, latency) {
+  // Every attempt's order ID is kept (orderIds), so a broker check after a
+  // restart can tell our own fills from unknown ones.
+  const orderIdsOf = attempts => (attempts || []).map(x => x && x.orderId).filter(Boolean).join(" ");
+
+  function closePosition(a, s, run, p, price, reason, orderId, latency, attempts) {
     const t = now();
     p.status     = reason === "EXPIRY" ? "EXPIRED" : "CLOSED";
     p.exitPrice  = round2(price);
@@ -149,12 +169,33 @@ function createRunner(deps) {
     p.exitOrderId = orderId || "";
     p.pnl        = pnlOf(p, price);
     recordTrade(a, s, p, p.side === "SELL" ? "BUY" : "SELL", p.qty, p.exitPrice, reason, {
-      pnl: p.pnl, orderId: orderId || "", status: reason === "EXPIRY" ? "SETTLED" : "FILLED",
+      pnl: p.pnl, orderId: orderId || "", orderIds: orderIdsOf(attempts), status: reason === "EXPIRY" ? "SETTLED" : "FILLED",
       ...latencyFields(latency),
     });
   }
 
   // settlement
+  // Settlement price of an expired option, best source first:
+  //   1. its own last traded price (live quote);
+  //   2. intrinsic value from the underlying futures price (CE: F-K, PE: K-F);
+  //   3. the last good price seen on expiry day;
+  //   4. nothing -> keep it open and try again (never settle at 0 by default).
+  function settlementPrice(pos, quotes, p) {
+    const live = Number(quotes[pos.token]?.ltp || 0);
+    if (live > 0) return { price: live, how: "last traded price" };
+    const chain = chainFor({ underlying: pos.symbol, segment: pos.segment }, pos.expiry, pos.expiry);
+    const fq = chain.future ? quotes[chain.future.token] : null;
+    const F = chainLib.mid(fq) || Number(fq?.ltp || 0);
+    if (F > 0) {
+      const k = Number(pos.strike);
+      const intrinsic = Math.max(0, pos.type === "CE" ? F - k : k - F);
+      return { price: round2(intrinsic), how: pos.expiry === p.date ? "intrinsic value from the futures price" : "approximate intrinsic value (settled late)" };
+    }
+    if (pos.lastPrice > 0 && pos.lastPriceDate === pos.expiry) return { price: pos.lastPrice, how: "last price seen on expiry day" };
+    if (chain.future) ensureSubscribed({ id: `settle:${pos.symbol}` }, [chain.future.token], pos.segment).catch(() => {});
+    return null;
+  }
+
   function settleExpired(a, s, run, p) {
     let changed = false;
     const quotes = getQuotes() || {};
@@ -162,11 +203,16 @@ function createRunner(deps) {
       if (!isOpen(pos) || exiting.has(pos.id)) continue;
       const due = pos.expiry < p.date || (pos.expiry === p.date && p.minutes >= ist.MARKET_CLOSE);
       if (!due) continue;
-      const ltp = Number(quotes[pos.token]?.ltp || 0);
-      closePosition(a, s, run, pos, ltp, "EXPIRY");
+      const sp = settlementPrice(pos, quotes, p);
+      if (!sp) {
+        eventOnce(`settle:${pos.id}`, 10 * 60_000, a, s, "warn",
+          `Cannot settle ${pos.client} ${pos.tradingSymbol} yet — no price for the option or its future; trying again`);
+        continue;
+      }
+      closePosition(a, s, run, pos, sp.price, "EXPIRY");
+      event(a, s, "info", `Expiry: ${pos.client} ${pos.tradingSymbol} settled at ${sp.price} (${sp.how})`);
       changed = true;
     }
-    if (changed) event(a, s, "info", "Positions at expiry settled at their last traded price");
     return changed;
   }
 
@@ -209,7 +255,7 @@ function createRunner(deps) {
           const r = results.find(x => String(x.token) === String(p.token)) || {};
           const filled = Number(r.filledQty || 0);
           if (r.status === "FILLED" || filled >= p.qty) {
-            closePosition(a, s, run, p, Number(r.avgPrice || 0), reason, r.orderId, r.latency);
+            closePosition(a, s, run, p, Number(r.avgPrice || 0), reason, r.orderId, r.latency, r.attempts);
           } else if (r.status === "MANUAL_CHECK") {
             p.status = "CHECK";
             p.checkReason = r.error || "exit outcome unknown";
@@ -218,7 +264,7 @@ function createRunner(deps) {
             // partial exit: book what filled, keep the rest open and retry
             const rest = { ...p };
             p.qty = filled;
-            closePosition(a, s, run, p, Number(r.avgPrice || 0), reason, r.orderId, r.latency);
+            closePosition(a, s, run, p, Number(r.avgPrice || 0), reason, r.orderId, r.latency, r.attempts);
             run.positions.push({ ...rest, id: store.newId("pos"), qty: rest.qty - filled, exitRetryAt: now() + EXIT_RETRY_MS });
             event(a, s, "warn", `Partial exit ${filled}/${rest.qty} for ${clientId} ${p.tradingSymbol} — retrying the rest`);
           } else {
@@ -248,11 +294,18 @@ function createRunner(deps) {
       ready.filter(x => x.entryDate === p.date).forEach(x => want(x, "TIME_EXIT"));
     }
 
+    // Remember each open position's last good mark, for P&L when the feed is quiet.
+    for (const pos of run.positions) {
+      if (!isOpen(pos)) continue;
+      const m = markOf(quotes, pos.token);
+      if (m > 0) { pos.lastPrice = round2(m); pos.lastPriceDate = p.date; }
+    }
+
     for (const pos of ready) {
       if (!(pos.stopPrice > 0)) continue;
-      const ltp = Number(quotes[pos.token]?.ltp || 0);
-      if (!(ltp > 0)) continue;
-      if (pos.side === "SELL" ? ltp >= pos.stopPrice : ltp <= pos.stopPrice) want(pos, "STOP");
+      const mark = markOf(quotes, pos.token);
+      if (!(mark > 0)) continue;
+      if (pos.side === "SELL" ? mark >= pos.stopPrice : mark <= pos.stopPrice) want(pos, "STOP");
     }
 
     // Daily loss per client: capital × client multiplier × pct.
@@ -263,8 +316,9 @@ function createRunner(deps) {
         if (!byClient.has(pos.client)) byClient.set(pos.client, { pnl: 0, mult: pos.multiplier || 1 });
         const agg = byClient.get(pos.client);
         if (isOpen(pos)) {
-          const ltp = Number(quotes[pos.token]?.ltp || 0);
-          agg.pnl += ltp > 0 ? pnlOf(pos, ltp) : 0;
+          // live mark, else the last good one — never count a leg as 0 loss for lack of a price
+          const px = markOf(quotes, pos.token) || Number(pos.lastPrice || 0);
+          agg.pnl += px > 0 ? pnlOf(pos, px) : 0;
         } else if (pos.exitDate === p.date) {
           agg.pnl += Number(pos.pnl || 0);
         }
@@ -359,6 +413,10 @@ function createRunner(deps) {
       picks.push({ leg, pick, lots: leg.lots * sym.lotsPerEntry });
     }
 
+    // Every leg must be priced off a fresh quote (sent within the last 60 s).
+    const stale = picks.find(({ pick }) => !isFresh(pick.token, QUOTE_MAX_AGE_MS));
+    if (stale) { event(a, s, "warn", `${label}: price for ${stale.pick.tradingSymbol} is old — whole entry skipped`); return; }
+
     const maxLots = Number(settings.limits?.maxLotsPerLeg || 0);
     const tooBig = picks.find(x => maxLots > 0 && x.lots > maxLots);
     if (tooBig) { event(a, s, "warn", `${label}: ${tooBig.lots} lots exceeds the admin limit of ${maxLots} per leg — skipped`); return; }
@@ -386,7 +444,8 @@ function createRunner(deps) {
 
     const t = now();
     const entryDate = ist.parts(t).date;
-    const addPosition = (client, { leg, pick }, qty, price, orderId, latency) => {
+    const opened = new Map(); // client id -> positions opened by this slot
+    const addPosition = (client, { leg, pick }, qty, price, orderId, latency, attempts) => {
       const side = leg.action;
       const stopPrice = spec.stop.mode === "per_leg"
         ? round2(side === "SELL" ? price * spec.stop.multiplier : price / spec.stop.multiplier)
@@ -402,7 +461,10 @@ function createRunner(deps) {
         mode, orderId: orderId || "", status: "OPEN",
       };
       run.positions.push(pos);
-      recordTrade(a, s, pos, side, qty, pos.entryPrice, `ENTRY ${group.id} ${slot}`, { orderId: pos.orderId, ...latencyFields(latency) });
+      if (!opened.has(client.id)) opened.set(client.id, []);
+      opened.get(client.id).push(pos);
+      pos.orderIds = orderIdsOf(attempts);
+      recordTrade(a, s, pos, side, qty, pos.entryPrice, `ENTRY ${group.id} ${slot}`, { orderId: pos.orderId, orderIds: pos.orderIds, ...latencyFields(latency) });
     };
 
     {
@@ -426,13 +488,28 @@ function createRunner(deps) {
           if (!res) continue;
           const filled = Number(res.filledQty || 0);
           if (filled > 0 && (FILLED.includes(res.status) || res.status === "MANUAL_CHECK")) {
-            addPosition(c, x, filled, Number(res.avgPrice || 0), res.orderId, res.latency);
+            addPosition(c, x, filled, Number(res.avgPrice || 0), res.orderId, res.latency, res.attempts);
           }
           if (res.status === "MANUAL_CHECK") checks.push(`${c.id} ${x.pick.tradingSymbol}: ${res.error || "unknown"}`);
           else if (res.status !== "FILLED") event(a, s, "error", `${label}: ${c.id} ${x.pick.tradingSymbol} ${res.status} ${filled}/${res.requestedQty ?? "?"} — ${res.error || ""}`);
         }
       }
       if (checks.length) pause(a, s, run, `Order needs a manual check — ${checks.join("; ")}`);
+
+      // All or nothing per client: if any leg did not fill completely, close
+      // the legs that did, so no unhedged (one-sided) position is left open.
+      // A leg needing a manual check is left alone (its outcome is unknown).
+      const unwind = [];
+      for (const c of cls) {
+        const mine = picks.map(x => results.find(rr => rr.client === c.id && String(rr.token) === String(x.pick.token)) || { status: "FAILED", filledQty: 0 });
+        if (mine.some(r => r.status === "MANUAL_CHECK")) continue;
+        const complete = mine.every(r => r.status === "FILLED");
+        const posList = opened.get(c.id) || [];
+        if (complete || !posList.length) continue;
+        event(a, s, "warn", `${label}: ${c.id} entry incomplete (${mine.map(r => `${r.status} ${r.filledQty || 0}/${r.requestedQty ?? "?"}`).join(", ")}) — closing the filled legs so nothing is left unhedged`);
+        posList.forEach(pos => unwind.push([pos, "UNWIND"]));
+      }
+      if (unwind.length) await exitPositions(a, s, run, unwind);
     }
 
     event(a, s, "info", `Entered ${label} (${mode}) for ${cls.map(c => c.id).join(", ")}: ` +
@@ -457,7 +534,7 @@ function createRunner(deps) {
     const t = now();
     const p = ist.parts(t);
     const work = [];
-    const marketOpen = !ist.isWeekend(p.date) && p.minutes >= ist.MARKET_OPEN && p.minutes < ist.MARKET_CLOSE;
+    const marketOpen = ist.isTradingDay(p.date, holidays()) && p.minutes >= ist.MARKET_OPEN && p.minutes < ist.MARKET_CLOSE;
 
     for (const a of store.listAssignments()) {
       const run = store.loadRun(a.id);
@@ -597,7 +674,13 @@ function createRunner(deps) {
       const s = store.getStrategy(a.strategyId);
       const openPos = run.positions.filter(p => isOpen(p) || p.status === "CHECK");
       const bySeg = new Map();
-      openPos.forEach(p => { if (!bySeg.has(p.segment)) bySeg.set(p.segment, []); bySeg.get(p.segment).push(p.token); });
+      openPos.forEach(p => {
+        if (!bySeg.has(p.segment)) bySeg.set(p.segment, []);
+        bySeg.get(p.segment).push(p.token);
+        // the future too: it prices expiry settlement when the option has no quote
+        const fut = chainFor({ underlying: p.symbol, segment: p.segment }, p.expiry, p.expiry).future;
+        if (fut) bySeg.get(p.segment).push(fut.token);
+      });
       for (const [seg, tokens] of bySeg) await ensureSubscribed(a, tokens, seg);
       event(a, s, "info", `Backend restarted — resuming (${run.status}, ${openPos.length} open position(s))`);
     }
@@ -607,7 +690,7 @@ function createRunner(deps) {
   function nextEntry(s, run, t) {
     const today = ist.parts(t).date;
     for (let i = 0, d = today; i < 30; i++, d = ist.addDays(d, 1)) {
-      if (ist.isWeekend(d)) continue;
+      if (!ist.isTradingDay(d, holidays())) continue;
       const slots = [];
       for (const sym of s.spec.symbols) {
         if (!planFor(s.spec, sym, d).entryDay) continue;

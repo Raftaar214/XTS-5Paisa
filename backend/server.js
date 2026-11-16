@@ -13,10 +13,12 @@ const {
 const {
   refreshInstruments, getDashboardInstruments, getInstrumentStatus, setInstruments,
 } = require("./instrumentloader");
-const { loginClient, logoutClient, getOrders, getTrades, getPositions, connectOrderStream, disconnectOrderStream, getBalance } = require("./xtsApi");
+const { loginClient, logoutClient, getOrders, getTrades, getPositions, connectOrderStream, disconnectOrderStream, getBalance, onSessionExpired } = require("./xtsApi");
+const ist = require("./strategy/ist");
+const { writeJsonAtomic, readJson } = require("./fsutil");
 const {
-  loginMarketData, connectMarketSocket, subscribeTokens, unsubscribeTokens, tokensOwnedBy,
-  onPriceUpdate, getLivePrices, getMarketStatus,
+  loginMarketData, connectMarketSocket, startMarketData, subscribeTokens, unsubscribeTokens, tokensOwnedBy,
+  onPriceUpdate, getLivePrices, getMarketStatus, isFresh,
 } = require("./Marketsocket");
 const { executeOrderMulti } = require("./index");
 const auth     = require("./auth");
@@ -167,15 +169,12 @@ function startWS(target = WS_PORT) {
 
 // Market data bootstrap — credentials come from the PARENT client.
 // Re-run whenever the Parent is added/edited in the Admin console.
+// A failed login is retried on its own (30 s, then every 60 s) until it works.
 async function bootMarketData() {
   console.log("\nMarket Data");
   try {
-    const mdToken = await loginMarketData();
-    if (mdToken) {
-      connectMarketSocket();
-    } else {
-      console.warn("Bid/Ask will show '—' — add a Parent client with Market Data API Key/Secret in the Admin console.\n");
-    }
+    const ok = await startMarketData();
+    if (!ok) console.warn("Bid/Ask will show '—' until the market-data login succeeds (retrying), or add a Parent client with Market Data API Key/Secret in the Admin console.\n");
   } catch (err) {
     console.warn("Market data login error:", err.message);
   }
@@ -196,6 +195,9 @@ async function brokerLogin(c) {
   if (typeof connectOrderStream === "function") {
     try { connectOrderStream(c); } catch (err) { console.warn(`Order stream ${c.id}: ${err.message}`); }
   }
+  // Compare the broker's books with ours (read-only) a moment after login.
+  const t = setTimeout(() => { reconcileClient(c).catch(() => {}); }, RECONCILE_DELAY_MS);
+  t.unref?.();
 }
 
 async function brokerLogout(c) {
@@ -207,6 +209,150 @@ async function brokerLogout(c) {
 }
 
 function findClient(id) { return clients.find(x => x.id === id); }
+
+// Broker trading sessions: expiry, saved state, broker check, schedule
+
+const DATA_DIR = process.env.XTS_DATA_DIR || path.join(__dirname, "data");
+const RECONCILE_DELAY_MS = Number(process.env.RECONCILE_DELAY_MS || 3000);
+
+// Recent session / broker-check notices for the admin monitor (also journaled).
+const brokerEvents = [];
+function brokerNotice(level, clientId, message) {
+  const e = { at: new Date().toISOString(), level, client: clientId, message };
+  brokerEvents.push(e);
+  if (brokerEvents.length > 200) brokerEvents.shift();
+  try { journal.appendEvent({ source: "SYSTEM", level, client: clientId, message: `${clientId}: ${message}` }); } catch (_) {}
+  const out = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
+  out(`${level === "error" ? "Error: " : level === "warn" ? "Warning: " : ""}${clientId}: ${message}`);
+}
+
+// When the broker says a client's session has ended (invalid token, logout,
+// stream closed): one automatic re-login per minute; if it fails, the client
+// is shown as logged out so nobody trusts a dead session.
+const reloginAt = new Map();
+const RELOGIN_COOLDOWN_MS = 60_000;
+async function handleSessionExpired(clientRef, reason) {
+  const c = findClient(clientRef?.id);
+  if (!c || !c.isLogged) return;
+  if (clientRef.token && c.token && clientRef.token !== c.token) return;   // an old token: already replaced
+  if (Date.now() - (reloginAt.get(c.id) || 0) < RELOGIN_COOLDOWN_MS) return;
+  reloginAt.set(c.id, Date.now());
+  const wasConnected = c.isConnected;
+  brokerNotice("warn", c.id, `broker session ended (${reason}) — logging in again`);
+  try {
+    await brokerLogin(c);
+    c.isConnected = wasConnected;
+    brokerNotice("info", c.id, "logged in again after the session ended");
+  } catch (err) {
+    c.isLogged = false; c.isConnected = false; c.token = null;
+    brokerNotice("error", c.id, `could not log in again: ${brokerError(err)} — log this client in manually`);
+  }
+}
+if (typeof onSessionExpired === "function") onSessionExpired((client, reason) => { handleSessionExpired(client, reason).catch(() => {}); });
+
+// Which clients were logged in / connected, saved every few seconds (no
+// tokens, no keys), so a restart the same day can log them in again.
+const BROKER_STATE_FILE = path.join(DATA_DIR, "broker-sessions.json");
+let lastBrokerState = "";
+function saveBrokerState() {
+  const state = {
+    date: ist.parts(Date.now()).date,
+    clients: Object.fromEntries(clients.filter(c => c.isLogged).map(c => [c.id, { connected: !!c.isConnected }])),
+  };
+  const json = JSON.stringify(state);
+  if (json === lastBrokerState) return;
+  lastBrokerState = json;
+  try { writeJsonAtomic(BROKER_STATE_FILE, state); } catch (err) { console.warn("Warning: could not save broker session state:", err.message); }
+}
+async function restoreBrokerSessions() {
+  const st = readJson(BROKER_STATE_FILE, null);
+  if (!st || st.date !== ist.parts(Date.now()).date) return;     // only the same trading day
+  for (const [id, x] of Object.entries(st.clients || {})) {
+    const c = findClient(id);
+    if (!c || !c.enabled || c.isLogged) continue;
+    try {
+      await brokerLogin(c);
+      c.isConnected = !!x.connected;
+      brokerNotice("info", id, "logged in again after a restart");
+    } catch (err) {
+      brokerNotice("error", id, `could not log in again after a restart: ${brokerError(err)}`);
+    }
+  }
+}
+
+// Read-only check after a login or restart: filled orders carrying our order
+// tag that the app has no record of, and LIVE positions the broker does not
+// show. Only warns — never places an order.
+const OUR_TAG = /^(M[0-9A-Z]{15}|MLO_)/;
+async function reconcileClient(c) {
+  if (!c?.isLogged) return { unknownOrders: [], missingPositions: [] };
+  const today = ist.parts(Date.now()).date;
+  const known = new Set();
+  for (const r of journal.read("trades", today, x => x.client === c.id)) {
+    if (r.orderId) known.add(String(r.orderId));
+    String(r.orderIds || "").split(" ").filter(Boolean).forEach(id => known.add(id));
+  }
+  const appOpen = [];
+  for (const a of strategyStore.listAssignments()) {
+    for (const p of strategyStore.loadRun(a.id).positions) {
+      if (p.client !== c.id) continue;
+      [p.orderId, p.exitOrderId, ...String(p.orderIds || "").split(" ")].filter(Boolean).forEach(id => known.add(String(id)));
+      if (p.mode === "LIVE" && p.status === "OPEN") appOpen.push(p);
+    }
+  }
+  const orders = await getOrders(c);
+  const unknownOrders = (orders || []).filter(o =>
+    OUR_TAG.test(String(o.OrderUniqueIdentifier || "")) && Number(o.CumulativeQuantity || 0) > 0 && !known.has(String(o.AppOrderID)));
+  for (const o of unknownOrders) {
+    brokerNotice("warn", c.id, `broker shows a filled order the app has no record of: AppOrderID ${o.AppOrderID} ${o.OrderSide || ""} ${o.CumulativeQuantity} ${o.TradingSymbol || o.ExchangeInstrumentID || ""} — check it and close it by hand if needed`);
+  }
+  let missingPositions = [];
+  if (appOpen.length) {
+    const net = new Map();
+    for (const r of (await getPositions(c)) || []) {
+      const tok = String(r.ExchangeInstrumentId ?? r.ExchangeInstrumentID ?? "");
+      const q = Number(r.Quantity ?? r.NetQty ?? r.NetQuantity ?? 0);
+      net.set(tok, (net.get(tok) || 0) + q);
+    }
+    missingPositions = appOpen.filter(p => !net.get(String(p.token)));
+    for (const p of missingPositions) {
+      brokerNotice("warn", c.id, `app has an open LIVE position the broker does not show: ${p.tradingSymbol} ${p.side} ${p.qty} — check the broker's positions`);
+    }
+  }
+  if (!unknownOrders.length && !missingPositions.length && (orders || []).length) brokerNotice("info", c.id, "broker check: orders and positions match the app");
+  return { unknownOrders, missingPositions };
+}
+
+// Log in (and connect) every enabled client: start-up option and schedule.
+async function loginAllEnabled(why) {
+  for (const c of clients.filter(x => x.enabled)) {
+    if (c.isLogged) { c.isConnected = true; continue; }
+    try {
+      await brokerLogin(c);
+      c.isConnected = true;
+      brokerNotice("info", c.id, `logged in and connected (${why})`);
+    } catch (err) {
+      brokerNotice("error", c.id, `${why}: login failed — ${brokerError(err)}`);
+    }
+  }
+}
+
+// Admin -> Execution & Limits -> Scheduled login: once per trading day at the
+// set IST time (broker session login only — never an order).
+function startAutoLoginLoop() {
+  let doneDate = null;
+  const timer = setInterval(() => {
+    const s = settings.getSettings();
+    const al = s.autoLogin || {};
+    if (!al.enabled) return;
+    const p = ist.parts(Date.now());
+    if (doneDate === p.date || !ist.isTradingDay(p.date, s.holidays)) return;
+    if (p.minutes < ist.toMinutes(al.time) || p.minutes >= ist.MARKET_CLOSE) return;
+    doneDate = p.date;
+    loginAllEnabled(`scheduled login ${al.time} IST`).catch(() => {});
+  }, 20_000);
+  timer.unref?.();
+}
 
 // Automated strategies
 const MARKET_STALE_MS = 120_000;
@@ -254,6 +400,7 @@ const runner = createRunner({
   },
   getSettings: settings.getSettings,
   clientFactor: sizingFactor,
+  isFresh: (token, maxAgeMs) => (typeof isFresh === "function" ? isFresh(token, maxAgeMs) : true),
   marketHealthy: () => {
     const m = getMarketStatus();
     return m.loggedIn && m.socketConnected && m.lastTickAgeMs != null && m.lastTickAgeMs < MARKET_STALE_MS;
@@ -516,6 +663,8 @@ admin.put("/settings", (req, res) => {
     if (before.tradingMode !== next.tradingMode) diffs.push(`MODE ${before.tradingMode} -> ${next.tradingMode}`);
     if (JSON.stringify(before.allowedSegments) !== JSON.stringify(next.allowedSegments)) diffs.push(`segments -> ${next.allowedSegments.join(",")}`);
     if (JSON.stringify(before.sizing) !== JSON.stringify(next.sizing)) diffs.push(`sizing -> ${JSON.stringify(next.sizing)}`);
+    if (JSON.stringify(before.holidays) !== JSON.stringify(next.holidays)) diffs.push(`holidays -> ${next.holidays.join(", ") || "none"}`);
+    if (JSON.stringify(before.autoLogin) !== JSON.stringify(next.autoLogin)) diffs.push(`scheduled login -> ${next.autoLogin.enabled ? next.autoLogin.time + " IST" : "off"}`);
     if (before.tradingHalted !== next.tradingHalted) diffs.push(next.tradingHalted ? `HALTED (${next.haltReason})` : "RESUMED trading");
     for (const g of ["engine", "limits"]) {
       for (const k of Object.keys(next[g])) {
@@ -542,6 +691,7 @@ admin.get("/monitor", (_, res) => {
     instruments: getInstrumentStatus(),
     latency: monitor.latencySummary(journal.read("trades", todayIst())),
     orderStreams: require("./orderStream").status(),
+    brokerEvents: brokerEvents.slice(-50),
     sessions: auth.listSessions(),
     clients: clients.map(clientManagementView),
     executions: monitor.getExecutions(),
@@ -1037,6 +1187,7 @@ app.post("/api/order", async (req, res) => {
           source: "MANUAL", mode: paper ? "PAPER" : "LIVE", user: who, symbol: r.symbol, client: r.client, clientName: r.clientName,
           tradingSymbol: r.label, token: r.token, side: r.side, qty: r.filledQty, price: r.avgPrice,
           reason: "MANUAL", status: r.status, orderId: r.orderId || "", error: r.error || "",
+          orderIds: (r.attempts || []).map(x => x && x.orderId).filter(Boolean).join(" "),
           requestedQty: r.requestedQty, limitPrice: r.attempts?.[0]?.limitPrice ?? "", bid: r.bid, ask: r.ask, ltp: r.ltp,
           attempts: r.attempts?.length || 0, executionTime: r.executionTime, multiplier: r.multiplier,
           queueMs: r.latency?.queueMs, ackMs: r.latency?.ackMs, fillMs: r.latency?.fillMs, totalMs: r.latency?.totalMs,
@@ -1150,28 +1301,52 @@ async function start() {
   await initClients();
   await bootMarketData();
 
+  // Clients that were logged in before a crash / restart today log in again.
+  await restoreBrokerSessions();
   // AUTO_LOGIN_ON_START=true: log every enabled client in to the broker and
   // connect it, so running strategies can trade after an unattended restart.
   if (String(process.env.AUTO_LOGIN_ON_START).toLowerCase() === "true") {
     console.log("AUTO_LOGIN_ON_START — logging in enabled clients…");
-    for (const c of clients.filter(x => x.enabled)) {
-      try { await brokerLogin(c); c.isConnected = true; }
-      catch (err) { console.error(`Error: Auto-login ${c.id}: ${brokerError(err)}`); }
-    }
+    await loginAllEnabled("AUTO_LOGIN_ON_START");
   }
+  setInterval(saveBrokerState, 5000).unref?.();
+  startAutoLoginLoop();
 
   await runner.init();
   startRunnerLoop();
   startTradeBookLoop();
 
-  const httpServer = app.listen(PORT, "0.0.0.0", () => {
-    console.log(`REST server on port ${PORT}`);
-    startWS(httpServer);
+  // HTTPS when TLS_CERT / TLS_KEY (PEM file paths) are set; plain HTTP otherwise.
+  let httpServer;
+  const onListen = proto => () => { console.log(`${proto} server on port ${PORT}`); startWS(httpServer); };
+  if (process.env.TLS_CERT && process.env.TLS_KEY) {
+    const https = require("https");
+    httpServer = https.createServer({ cert: fs.readFileSync(process.env.TLS_CERT), key: fs.readFileSync(process.env.TLS_KEY) }, app)
+      .listen(PORT, "0.0.0.0", onListen("HTTPS"));
+  } else {
+    httpServer = app.listen(PORT, "0.0.0.0", onListen("REST (HTTP)"));
+  }
+}
+
+// Crash guard: a stray promise error is logged and the server keeps running;
+// a truly unexpected error saves state and exits, and start.bat / start.sh
+// start the server again a few seconds later.
+function installCrashGuard() {
+  process.on("unhandledRejection", err => {
+    console.error("Error: unhandled error (server keeps running):", err?.stack || err);
+    try { journal.appendEvent({ source: "SYSTEM", level: "error", message: `Unhandled error (server kept running): ${err?.message || err}` }); } catch (_) {}
+  });
+  process.on("uncaughtException", err => {
+    console.error("Error: unexpected error — the server will restart:", err?.stack || err);
+    try { journal.appendEvent({ source: "SYSTEM", level: "error", message: `Unexpected error, server restarting: ${err?.message || err}` }); } catch (_) {}
+    try { lastBrokerState = ""; saveBrokerState(); } catch (_) {}
+    setTimeout(() => process.exit(1), 200);
   });
 }
 
 if (require.main === module) {
+  installCrashGuard();
   start().catch(err => { console.error("Error: Fatal:", err); process.exit(1); });
 }
 
-module.exports = { app, startWS, start, runner };
+module.exports = { app, startWS, start, runner, reconcileClient, handleSessionExpired, saveBrokerState, restoreBrokerSessions, loginAllEnabled, installCrashGuard };

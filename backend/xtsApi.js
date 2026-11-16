@@ -29,6 +29,26 @@ function ok(res) {
   return res.data?.type === "success" || res.data?.result !== undefined;
 }
 
+// A broker answer that means "this client's trading session is no longer
+// valid" (token expired overnight, or the same key logged in elsewhere).
+function isSessionError(errOrBody) {
+  const body = errOrBody?.response?.data ?? errOrBody?.data ?? errOrBody;
+  const status = errOrBody?.response?.status;
+  const code = String(body?.code || "");
+  const text = String(body?.description || body?.message || errOrBody?.message || "");
+  return status === 401 || /^e-session/i.test(code) || /invalid token|token (is )?expired|session (has )?(expired|ended)|not logged in/i.test(text);
+}
+
+// Listeners told when a client's trading session has ended: (client, reason).
+const sessionListeners = new Set();
+function onSessionExpired(fn) { sessionListeners.add(fn); return () => sessionListeners.delete(fn); }
+function reportSession(client, errOrBody) {
+  if (!client || !isSessionError(errOrBody)) return;
+  const body = errOrBody?.response?.data ?? errOrBody;
+  const reason = body?.description || body?.message || errOrBody?.message || "session ended";
+  sessionListeners.forEach(fn => { try { fn(client, reason); } catch (_) {} });
+}
+
 function logErr(label, err) {
   if (err.response) {
     console.error(`Error: ${label}: HTTP ${err.response.status}`);
@@ -120,6 +140,7 @@ async function placeOrder(client, payload) {
       // rejection (safe to retry), not an unknown outcome like a timeout.
       const rejection = new Error(d.description || d.message || "Order failed");
       rejection.response = res;
+      reportSession(client, rejection);
       throw rejection;
     }
 
@@ -134,6 +155,7 @@ async function placeOrder(client, payload) {
     if (err.response) {
       console.log("Status :", err.response.status);
       console.log("Body :", JSON.stringify(err.response.data, null, 2));
+      reportSession(client, err);
     } else {
       console.log(err.message);
     }
@@ -167,6 +189,7 @@ async function getOrders(client) {
     return [];
   } catch (e) {
     logErr(`getOrders (${client.id})`, e);
+    reportSession(client, e);
     return [];
   }
 }
@@ -184,6 +207,7 @@ async function getTrades(client) {
     return [];
   } catch (e) {
     logErr(`getTrades (${client.id})`, e);
+    reportSession(client, e);
     return [];
   }
 }
@@ -204,6 +228,7 @@ async function getPositions(client) {
     return [];
   } catch (e) {
     logErr(`getPositions (${client.id})`, e);
+    reportSession(client, e);
 
     // Retry without clientID — some 5paisa versions reject it
     if (e.response?.status === 400) {
@@ -234,7 +259,8 @@ async function getPositions(client) {
 // retrying with a fresh price for that remaining qty only.
 async function cancelOrder(client, appOrderId) {
   await getSharedGuard().beforeOrder(client.id);
-  const uid = `CAN_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  // 16 characters: within any broker limit for orderUniqueIdentifier (XTS: 20).
+  const uid = ("C" + Date.now().toString(36) + Math.random().toString(36).slice(2) + "00000000").toUpperCase().slice(0, 16);
 
   try {
     const res = await axios.delete(`${baseFor(client)}/interactive/orders`, {
@@ -255,6 +281,7 @@ async function cancelOrder(client, appOrderId) {
     console.log("Data:", JSON.stringify(res.data, null, 2));
 
     if (res.data?.type !== "success") {
+      reportSession(client, res);
       throw new Error(res.data?.description || "Cancel failed");
     }
 
@@ -315,6 +342,7 @@ async function getOrderHistory(client, appOrderId) {
       `[OrderHistory] ${appOrderId}:`,
       err.response?.data?.description || err.message
     );
+    reportSession(client, err);
     return [];
   }
 }
@@ -327,6 +355,7 @@ async function getBalance(client) {
     params: { clientID: client.userID },
   });
   if (res.data?.type !== "success") {
+    reportSession(client, res);
     throw new Error(res.data?.description || "Balance request failed");
   }
   return res.data.result;
@@ -334,7 +363,10 @@ async function getBalance(client) {
 
 // ORDER-UPDATE STREAM (receive only) — see orderStream.js
 function connectOrderStream(client) {
-  require("./orderStream").connect(client, baseFor(client));
+  // The broker closing the stream (logout / server disconnect) means the
+  // session ended too: same handling as an "invalid token" answer.
+  require("./orderStream").connect(client, baseFor(client), reason =>
+    reportSession(client, { code: "e-session-stream", description: reason }));
 }
 function disconnectOrderStream(client) {
   require("./orderStream").disconnect(client.id);
@@ -342,5 +374,5 @@ function disconnectOrderStream(client) {
 
 module.exports = {
   loginClient, logoutClient, placeOrder, cancelOrder, getOrderHistory, getOrders, getTrades, getPositions,
-  connectOrderStream, disconnectOrderStream, getBalance,
+  connectOrderStream, disconnectOrderStream, getBalance, isSessionError, onSessionExpired,
 };

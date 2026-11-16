@@ -23,7 +23,7 @@ const KINDS = ["trades", "events"];
 const TRADE_COLUMNS = [
   "date", "time", "source", "mode", "user", "strategy", "assignmentId", "symbol",
   "client", "clientName", "tradingSymbol", "token", "side", "qty", "price",
-  "reason", "status", "orderId", "pnl", "requestedQty", "limitPrice", "bid", "ask", "ltp",
+  "reason", "status", "orderId", "orderIds", "pnl", "requestedQty", "limitPrice", "bid", "ask", "ltp",
   "attempts", "executionTime", "queueMs", "ackMs", "fillMs", "totalMs", "multiplier", "error", "id",
 ];
 const EVENT_COLUMNS = ["date", "time", "source", "level", "user", "strategy", "assignmentId", "client", "message", "clientTime", "id"];

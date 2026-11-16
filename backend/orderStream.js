@@ -51,7 +51,9 @@ function waitForOrderUpdate(appOrderId, timeoutMs, since = 0) {
   });
 }
 
-function connect(client, rootUrl) {
+// onSessionEnd(reason): called when the broker ends the session on this
+// socket ("logout", or a server-side disconnect it will not retry).
+function connect(client, rootUrl, onSessionEnd = () => {}) {
   if (!client?.token || !client?.userID) return;
   disconnect(client.id);
   const io = require("socket.io-client");
@@ -65,9 +67,13 @@ function connect(client, rootUrl) {
   const entry = { socket, connected: false, lastEventAt: null };
   sockets.set(client.id, entry);
   socket.on("connect",    () => { entry.connected = true;  console.log(`Order stream connected: ${client.id}`); });
-  socket.on("disconnect", r  => { entry.connected = false; console.log(`Order stream disconnected: ${client.id} (${r})`); });
+  socket.on("disconnect", r  => {
+    entry.connected = false;
+    console.log(`Order stream disconnected: ${client.id} (${r})`);
+    if (r === "io server disconnect") onSessionEnd("the broker closed the order stream");
+  });
   socket.on("error",      e  => console.warn(`Order stream error ${client.id}:`, e?.message || e));
-  socket.on("logout",     () => { entry.connected = false; });
+  socket.on("logout",     () => { entry.connected = false; onSessionEnd("the broker logged the session out"); });
   socket.on("order",      raw => { entry.lastEventAt = Date.now(); handleOrderMessage(raw); });
   socket.on("trade",      ()  => { entry.lastEventAt = Date.now(); });
 }

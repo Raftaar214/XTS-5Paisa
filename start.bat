@@ -56,13 +56,15 @@ if defined CHECK_ONLY (
 )
 
 echo Starting the backend. Keep this window open while trading.
+echo If the server stops for any reason it starts again by itself. Close this window to stop it.
 echo.
 cd backend
+:run
 node server.js
 echo.
-echo The server has stopped.
-pause
-exit /b 0
+echo The server stopped (exit code %errorlevel%). Starting it again in 5 seconds - close this window to stop.
+timeout /t 5 /nobreak >nul
+goto run
 
 :fail
 if not defined CHECK_ONLY pause

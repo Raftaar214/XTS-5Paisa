@@ -330,6 +330,8 @@ Authorization: Bearer signed-admin-token
 | `sizing.mode` | `multiplier` (each client's multiplier) or `capital` (client capital / `baseCapital`) |
 | `sizing.rounding` | `floor` (default — never more than the ratio) or `round` |
 | `engine.orderGapMs` | minimum gap between two orders of one client, 50-2000 ms (default 110; `ORDER_MIN_GAP_MS` overrides) |
+| `holidays` | exchange holidays, `["YYYY-MM-DD", …]`: market closed for strategies, not counted for DTE |
+| `autoLogin` | `{ "enabled": false, "time": "09:00" }`: log in and connect every enabled client at this IST time on trading days (session login only) |
 
 Values outside the allowed ranges (returned by `GET` under `ranges`) are rejected with `400`. A limit of `0` means no limit. Settings are saved to `backend/data/settings.json`. A new install starts with `tradingMode: "PAPER"` and `tradingHalted: true`.
 
@@ -346,6 +348,8 @@ Returns uptime, memory, trading settings, executions in flight, dashboard socket
 - `sessions`: logged-in dashboard users.
 - `orderStreams`: each client's Interactive order-socket state.
 - `latency`: execute-to-fill statistics (queue / ack / fill / total, ms).
+- `brokerEvents`: the last 50 broker-session notices — automatic re-logins, re-login after a restart, and the read-only broker check after login (unknown filled orders, LIVE positions the broker does not show).
+- `market` also has `retryingLogin` (a failed login is being retried), `pendingSubscriptions` (contracts waiting to be subscribed again) and `takeoverLevel` (how far the take-over back-off has grown).
 
 History resets when the backend restarts.
 

@@ -34,6 +34,7 @@ fs.writeFileSync(path.join(dataDir, "clients.json"), JSON.stringify([
 ]));
 Object.assign(process.env, {
   XTS_DATA_DIR: dataDir,
+  RECONCILE_DELAY_MS: "100000",
   AUTH_SECRET: "test-secret-not-real",
   APP_USERNAME: "", APP_PASSWORD: "",
   APP_USER1_NAME: "alice", APP_USER1_PASSWORD: "alice-pw",
@@ -57,6 +58,8 @@ function mockModule(relPath, exports) {
 }
 
 let placeOrderCalls = 0;
+// what the fake broker's session / books look like (read-only calls only)
+const brokerSim = { logins: 0, loginFail: false, sessionCb: null, orders: [], positions: [] };
 let balanceCalls = 0;
 // What the fake broker's balance endpoint returns (read-only).
 const BALANCE = {
@@ -69,21 +72,24 @@ const BROKER_TRADES = [
   { ExchangeTradeID: "X2", AppOrderID: 502, TradingSymbol: "NIFTY 23800 PE", OrderSide: "SELL", LastTradedQuantity: 150, LastTradedPrice: 38.1 },
 ];
 mockModule("./xtsApi.js", {
-  loginClient:  async c => ({ token: `fake-${c.id}`, userID: c.id }),
+  loginClient:  async c => { brokerSim.logins++; if (brokerSim.loginFail) throw new Error("login refused"); return { token: `fake-${c.id}-${brokerSim.logins}`, userID: c.id }; },
+  onSessionExpired: fn => { brokerSim.sessionCb = fn; },
   logoutClient: async () => {},
   placeOrder:   async () => { placeOrderCalls++; throw new Error("TEST: live order blocked"); },
   cancelOrder:  async () => { throw new Error("TEST: no cancel"); },
   getOrderHistory: async () => [],
-  getOrders:    async () => [],
+  getOrders:    async () => brokerSim.orders,
   getTrades:    async c => (c.id === "C1" ? BROKER_TRADES : []),
   getBalance:   async c => { balanceCalls++; return BALANCE[c.id] || { BalanceList: [] }; },
-  getPositions: async () => [],
+  getPositions: async () => brokerSim.positions,
 });
 let priceCb = null;
 const owned = new Map(); // owner -> Set(token), like the real Marketsocket
 mockModule("./Marketsocket.js", {
   loginMarketData: async () => null,
   connectMarketSocket: () => {},
+  startMarketData: async () => true,
+  isFresh: () => true,
   subscribeTokens: async (tokens, _segs, owner) => { if (!owned.has(owner)) owned.set(owner, new Set()); tokens.forEach(t => owned.get(owner).add(String(t))); },
   unsubscribeTokens: async (tokens, owner) => { tokens.forEach(t => owned.get(owner)?.delete(String(t))); },
   tokensOwnedBy: owner => [...(owned.get(owner) || [])],
@@ -136,7 +142,9 @@ async function userToken(name, pw) {
   return r.data.token;
 }
 async function adminToken() {
-  const r = await call("POST", "/api/admin/login", { body: { username: "root", password: "root-pw" } });
+  let r = await call("POST", "/api/admin/login", { body: { username: "root", password: "root-pw" } });
+  // a later test changes the admin password
+  if (r.status === 401) r = await call("POST", "/api/admin/login", { body: { username: "root", password: "root-pw-restored" } });
   assert.strictEqual(r.status, 200, JSON.stringify(r.data));
   return r.data.token;
 }
@@ -804,6 +812,79 @@ test("admin changes its own password: other admin sessions end, the old password
   await new Promise(res => setTimeout(res, 5));
   r = await call("POST", "/api/admin/password", { token: fresh, body: { currentPassword: "root-new-pw-1", newPassword: "root-pw-restored" } });
   assert.strictEqual(r.status, 200);
+});
+
+// broker sessions
+test("when the broker ends a client's session, it logs in again once by itself", async () => {
+  const t = await userToken("alice", "alice-new-pw-1");
+  assert.strictEqual((await call("POST", "/api/clients/C1/login", { token: t })).status, 200);
+  const before = brokerSim.logins;
+  const c1 = (await call("GET", "/api/clients", { token: t })).data.find(c => c.id === "C1");
+  assert.ok(c1.isLogged);
+  await brokerSim.sessionCb({ id: "C1" }, "Invalid Token");
+  await new Promise(r => setTimeout(r, 20));
+  assert.strictEqual(brokerSim.logins, before + 1, "one automatic re-login");
+  await brokerSim.sessionCb({ id: "C1" }, "Invalid Token");     // again within a minute: no loop
+  await new Promise(r => setTimeout(r, 20));
+  assert.strictEqual(brokerSim.logins, before + 1);
+  assert.ok((await call("GET", "/api/clients", { token: t })).data.find(c => c.id === "C1").isLogged);
+});
+
+test("if the automatic re-login fails, the client is shown as logged out", async () => {
+  const srv = require(BACKEND + "/server");
+  const t = await userToken("bob", "bob-pw");
+  await call("POST", "/api/clients/C2/login", { token: t });
+  brokerSim.loginFail = true;
+  await srv.handleSessionExpired({ id: "C2" }, "Invalid Token");
+  brokerSim.loginFail = false;
+  const c2 = (await call("GET", "/api/clients", { token: t })).data.find(c => c.id === "C2");
+  assert.strictEqual(c2.isLogged, false);
+  const admin = await adminToken();
+  const mon = (await call("GET", "/api/admin/monitor", { token: admin })).data;
+  assert.ok(mon.brokerEvents.some(e => e.client === "C2" && /could not log in again/.test(e.message)));
+});
+
+test("broker check after login warns about filled orders the app does not know (read-only)", async () => {
+  const srv = require(BACKEND + "/server");
+  const clientsMod = require(BACKEND + "/clients");
+  const c1 = clientsMod.clients.find(c => c.id === "C1");
+  brokerSim.orders = [
+    { AppOrderID: 9001, OrderUniqueIdentifier: "MABCDEFGH1234567", CumulativeQuantity: 75, OrderSide: "SELL", TradingSymbol: "NIFTY 24200 CE" },
+    { AppOrderID: 9002, OrderUniqueIdentifier: "SOMEOTHERAPP", CumulativeQuantity: 75 },       // not ours: ignored
+  ];
+  const r = await srv.reconcileClient(c1);
+  brokerSim.orders = [];
+  assert.deepStrictEqual(r.unknownOrders.map(o => o.AppOrderID), [9001]);
+  assert.strictEqual(placeOrderCalls, 0, "a check only — nothing is sent");
+});
+
+test("logged-in clients are saved (no tokens) and logged in again after a restart the same day", async () => {
+  const srv = require(BACKEND + "/server");
+  const clientsMod = require(BACKEND + "/clients");
+  const t = await userToken("alice", "alice-new-pw-1");
+  await call("POST", "/api/clients/C1/login", { token: t });
+  await call("POST", "/api/clients/C1/connect", { token: t });
+  srv.saveBrokerState();
+  const saved = fs.readFileSync(path.join(dataDir, "broker-sessions.json"), "utf8");
+  assert.ok(saved.includes('"C1"') && !saved.includes("fake-"), "ids only, never tokens");
+  const c1 = clientsMod.clients.find(c => c.id === "C1");
+  c1.isLogged = false; c1.isConnected = false; c1.token = null;            // "restart"
+  await srv.restoreBrokerSessions();
+  assert.strictEqual(c1.isLogged, true);
+  assert.strictEqual(c1.isConnected, true);
+});
+
+test("holidays and scheduled login are validated admin settings", async () => {
+  const admin = await adminToken();
+  let r = await call("PUT", "/api/admin/settings", { token: admin, body: { holidays: ["2026-11-24", "bad"] } });
+  assert.strictEqual(r.status, 400);
+  r = await call("PUT", "/api/admin/settings", { token: admin, body: { holidays: ["2026-11-24", "2026-11-24"], autoLogin: { enabled: true, time: "09:00" } } });
+  assert.strictEqual(r.status, 200);
+  assert.deepStrictEqual(r.data.holidays, ["2026-11-24"]);
+  assert.deepStrictEqual(r.data.autoLogin, { enabled: true, time: "09:00" });
+  r = await call("PUT", "/api/admin/settings", { token: admin, body: { autoLogin: { time: "25:99" } } });
+  assert.strictEqual(r.status, 400);
+  await call("PUT", "/api/admin/settings", { token: admin, body: { autoLogin: { enabled: false } } });
 });
 
 test("no order ever reached the (fake) broker", () => {

@@ -70,6 +70,12 @@ const DEFAULTS = {
     maxActiveClients: 0,
     maxOrdersPerMinute: 60,
   },
+  // Exchange holidays ("YYYY-MM-DD"): the strategy runner treats them as
+  // market closed and does not count them as trading days (DTE).
+  holidays: [],
+  // Log in + connect every enabled client at this IST time on trading days
+  // (broker session login only — never an order). Off by default.
+  autoLogin: { enabled: false, time: "09:00" },
 };
 
 let settings = clone(DEFAULTS);
@@ -89,6 +95,8 @@ function load() {
         haltReason:    String(raw.haltReason || ""),
         engine: { ...DEFAULTS.engine, ...(raw.engine || {}) },
         limits: { ...DEFAULTS.limits, ...(raw.limits || {}) },
+        holidays: Array.isArray(raw.holidays) ? raw.holidays.filter(isDate) : [],
+        autoLogin: { ...DEFAULTS.autoLogin, ...(raw.autoLogin || {}) },
       };
       return;
     }
@@ -111,6 +119,8 @@ function persist() {
 }
 
 function fail(message) { return Object.assign(new Error(message), { status: 400 }); }
+const isDate = d => typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d) && !Number.isNaN(Date.parse(d));
+const isHhmm = t => typeof t === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(t);
 
 function validateGroup(input, ranges, label) {
   const out = {};
@@ -158,6 +168,17 @@ function updateSettings(patch = {}) {
     z.baseCapital = Number(z.baseCapital);
     if (!(z.baseCapital >= 10000 && z.baseCapital <= 1e12)) throw fail("sizing.baseCapital must be between ₹10,000 and ₹1,00,000 Cr");
     next.sizing = z;
+  }
+  if (patch.holidays !== undefined) {
+    if (!Array.isArray(patch.holidays)) throw fail("holidays must be a list of dates (YYYY-MM-DD)");
+    const bad = patch.holidays.find(d => !isDate(String(d).trim()));
+    if (bad !== undefined) throw fail(`"${bad}" is not a date — use YYYY-MM-DD`);
+    next.holidays = [...new Set(patch.holidays.map(d => String(d).trim()))].sort();
+  }
+  if (patch.autoLogin !== undefined) {
+    const al = { ...next.autoLogin, ...(patch.autoLogin || {}) };
+    if (!isHhmm(al.time)) throw fail("autoLogin.time must be HH:MM (IST)");
+    next.autoLogin = { enabled: Boolean(al.enabled), time: al.time };
   }
   if (patch.tradingHalted !== undefined) {
     next.tradingHalted = Boolean(patch.tradingHalted);

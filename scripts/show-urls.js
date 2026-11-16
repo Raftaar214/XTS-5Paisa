@@ -47,6 +47,15 @@ if (!env.ADMIN_USERNAME || !env.ADMIN_PASSWORD) {
   console.log("  NOTE: ADMIN_USERNAME / ADMIN_PASSWORD are not set in backend/.env —");
   console.log("        the Admin console stays disabled until you add them.");
 }
+if (process.platform === "win32") {
+  console.log("");
+  console.log("  Keep this PC awake during market hours, or the server pauses with it.");
+  console.log("  Settings > System > Power > Sleep: Never (when plugged in), or run once:");
+  console.log("     powercfg /change standby-timeout-ac 0");
+}
+if (!env.DATA_KEY) {
+  console.log("  NOTE: DATA_KEY is not set — client API keys are stored as plain text in backend/data/clients.json.");
+}
 if (!env.AUTH_SECRET) {
   console.log("  NOTE: AUTH_SECRET is not set — everyone must log in again after each restart.");
 }
