@@ -35,12 +35,18 @@ console.log("");
 console.log("  Cloud server (AWS / Oracle): the public IP is not on this machine's");
 console.log(`  network card — use http://<public-ip>:${port} and allow TCP ${port}`);
 console.log("  in the instance's security group / security list.");
-console.log("  Other computers can't connect? Allow the port in Windows Firewall");
-console.log("  (run in an Administrator prompt, once):");
-console.log(`     netsh advfirewall firewall add rule name="XTS Trading Desk" dir=in action=allow protocol=TCP localport=${port}`);
+if (process.platform === "win32") {
+  console.log("  Other computers can't connect? Allow the port in Windows Firewall");
+  console.log("  (run in an Administrator prompt, once):");
+  console.log(`     netsh advfirewall firewall add rule name="XTS Trading Desk" dir=in action=allow protocol=TCP localport=${port}`);
+} else {
+  console.log("  Other computers can't connect? Open the port in the server firewall, e.g.");
+  console.log(`     sudo ufw allow ${port}/tcp        (Ubuntu)`);
+  console.log(`     sudo firewall-cmd --add-port=${port}/tcp --permanent && sudo firewall-cmd --reload   (Oracle Linux)`);
+}
 if (!env.ADMIN_USERNAME || !env.ADMIN_PASSWORD) {
   console.log("");
-  console.log("  NOTE: ADMIN_USERNAME / ADMIN_PASSWORD are not set in backend\\.env —");
+  console.log("  NOTE: ADMIN_USERNAME / ADMIN_PASSWORD are not set in backend/.env —");
   console.log("        the Admin console stays disabled until you add them.");
 }
 if (!env.AUTH_SECRET) {

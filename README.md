@@ -31,6 +31,7 @@ The structure follows the same professional documentation pattern used by the Sy
 XTS 5paisa/
 |-- backend/
 |-- start.bat                  One-click start: install, build, serve on this PC's IP
+|-- start.sh                   Same for Linux / macOS servers
 |-- scripts/show-urls.js       Prints the LAN URLs the dashboard can be opened on
 |-- tests/                     All tests (fake broker — never place real orders)
 |   `-- fixtures/
@@ -101,7 +102,7 @@ npm install
 
 ## Backend Configuration
 
-Create or update `backend/.env` with the following values:
+Copy `backend/.env.example` to `backend/.env` and fill it in. The file looks like this:
 
 ```env
 # Dashboard users (APP_USER1_*, APP_USER2_*, … up to 20)
@@ -175,6 +176,78 @@ npm start
 ```
 
 Then open `http://<this PC's IP>:5000`. The built `index.html` is served with `no-cache`, so a rebuild shows up on the next page load.
+
+### Linux / macOS
+
+```bash
+./start.sh
+```
+
+Same steps as `start.bat`; `./start.sh --check` does everything except start the server.
+
+## Deploying on a Server (from GitHub)
+
+Works on any Linux VM (AWS EC2, Oracle Cloud, …) with Node.js 18+.
+
+1. Get the code:
+
+   ```bash
+   git clone https://github.com/Raftaar214/XTS-5Paisa.git
+   cd XTS-5Paisa
+   ```
+
+2. Create the settings file and fill in your passwords and XTS keys:
+
+   ```bash
+   cp backend/.env.example backend/.env
+   nano backend/.env
+   ```
+
+3. Check it builds:
+
+   ```bash
+   ./start.sh --check
+   ```
+
+4. Open the port (default 5000) in the cloud firewall (AWS security group / Oracle security list) and on the VM (`ufw` / `firewall-cmd`; `start.sh` prints the command).
+
+5. Run it as a service so it keeps running after you log out and starts again after a reboot. Create `/etc/systemd/system/xts.service` (replace `ubuntu` and the path with your user and folder):
+
+   ```ini
+   [Unit]
+   Description=XTS Trading Desk
+   After=network-online.target
+   Wants=network-online.target
+
+   [Service]
+   User=ubuntu
+   WorkingDirectory=/home/ubuntu/XTS-5Paisa/backend
+   ExecStart=/usr/bin/node server.js
+   Restart=always
+   RestartSec=5
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now xts
+   journalctl -u xts -f
+   ```
+
+6. Open `http://<server public IP>:5000`.
+
+**Updating** to the latest code from GitHub:
+
+```bash
+cd XTS-5Paisa
+git pull
+./start.sh --check
+sudo systemctl restart xts
+```
+
+What is **not** in GitHub and lives only on the server: `backend/.env` (passwords, keys) and `backend/data/` (clients and their API keys, settings, sessions, strategies, trade books and journals). Back up `backend/data/` to move to a new server; without it, add the clients again in the Admin console. The dashboard is built on the server, so `frontend/dist` is not in GitHub either.
 
 ### Frontend development
 
