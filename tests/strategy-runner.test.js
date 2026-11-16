@@ -216,6 +216,22 @@ test("starting mid-day skips the slots already past instead of firing them late"
   runner.squareOff(a.id, "nikhil"); await runner.tick();
 });
 
+test("the start message counts missed slots only on an entry day", async () => {
+  const startMsg = (date, id) => journal.read("events", date, r => r.assignmentId === id && /Strategy started/.test(r.message)).pop()?.message;
+
+  // the day before expiry (DTE 1): late start, but nothing was due — no "missed" warning
+  const a = setup();
+  at("2026-11-16", "14:50"); runner.start(a.id, "nikhil");
+  assert.doesNotMatch(startMsg("2026-11-16", a.id), /missed|skipped/);
+  runner.stop(a.id, "nikhil");
+
+  // expiry day (DTE 0), started at 09:35: the 09:20 and 09:30 entries really were missed
+  const b = setup();
+  at(EXPIRY, "09:35"); runner.start(b.id, "nikhil");
+  assert.match(startMsg(EXPIRY, b.id), /2 entry slot\(s\) earlier today were missed \(NIFTY/);
+  runner.stop(b.id, "nikhil");
+});
+
 test("a leg whose premium doubles is bought back (per-leg stop)", async () => {
   const a = setup();
   at(EXPIRY, "09:15"); runner.start(a.id, "nikhil");

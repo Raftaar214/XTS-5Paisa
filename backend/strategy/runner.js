@@ -521,14 +521,21 @@ function createRunner(deps) {
     const t = now();
     const p = ist.parts(t);
     rollDay(run, p.date);
-    // Slots before the start minute are skipped — never fired late.
+    // Slots before the start minute are skipped — never fired late. Only
+    // slots that would really have traded (today is that symbol's entry day)
+    // are reported as missed entries.
     const startMinute = ist.timeOn(p.date, p.hhmm);
     let skipped = 0;
+    const skippedSyms = new Set();
     for (const sym of s.spec.symbols) {
+      const entryDay = planFor(s.spec, sym, p.date).entryDay;
       for (const g of s.spec.groups) {
         for (const slot of g.slots) {
           const key = `${sym.underlying}|${g.id}|${slot}`;
-          if (ist.timeOn(p.date, slot) < startMinute && !run.slotsDone.includes(key)) { run.slotsDone.push(key); skipped++; }
+          if (ist.timeOn(p.date, slot) < startMinute && !run.slotsDone.includes(key)) {
+            run.slotsDone.push(key);
+            if (entryDay) { skipped++; skippedSyms.add(sym.underlying); }
+          }
         }
       }
     }
@@ -539,7 +546,7 @@ function createRunner(deps) {
     run.startedBy = by;
     store.saveRun(run);
     lastPrewarm.delete(a.id);
-    event(a, s, "info", `Strategy started by ${by} (${modeOf(a)}${modeOf(a) !== a.mode ? " — global PAPER mode" : ""})${skipped ? ` — ${skipped} earlier slot(s) today skipped` : ""}`);
+    event(a, s, "info", `Strategy started by ${by} (${modeOf(a)}${modeOf(a) !== a.mode ? " — global PAPER mode" : ""})${skipped ? ` — ${skipped} entry slot(s) earlier today were missed (${[...skippedSyms].join(", ")} entry day; started late)` : ""}`);
     return run;
   }
 
