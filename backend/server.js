@@ -15,7 +15,7 @@ const {
 } = require("./instrumentloader");
 const { loginClient, logoutClient, getOrders, getTrades, getPositions, connectOrderStream, disconnectOrderStream, getBalance } = require("./xtsApi");
 const {
-  loginMarketData, connectMarketSocket, subscribeTokens, unsubscribeTokens,
+  loginMarketData, connectMarketSocket, subscribeTokens, unsubscribeTokens, tokensOwnedBy,
   onPriceUpdate, getLivePrices, getMarketStatus,
 } = require("./Marketsocket");
 const { executeOrderMulti } = require("./index");
@@ -130,8 +130,12 @@ function startWS(target = WS_PORT) {
   if (!sessionWatch) {
     sessionWatch = true;
     // An ended session (logout, replaced by a new login, ended by admin) loses its price stream at once.
-    auth.onSessionEnded(({ sid, reason }) => {
+    auth.onSessionEnded(({ username, sid, reason }) => {
       for (const srv of quoteServers) srv.clients.forEach(ws => { if (ws.user?.sid === sid) ws.close(4401, reason); });
+      // ...and the leg tokens that user's dashboard had subscribed.
+      const owner = `ui:${username}`;
+      const held = tokensOwnedBy(owner);
+      if (held.length) unsubscribeTokens(held, owner).catch(() => {});
     });
   }
 
@@ -414,6 +418,21 @@ admin.delete("/sessions/:username", (req, res) => {
   const ended = auth.endSession(req.params.username, "admin");
   if (ended) monitor.recordAudit(actor(req), "Ended dashboard session", req.params.username);
   res.json({ success: true, ended });
+});
+
+// Users tab: who is logged in, and password resets. Passwords are never returned.
+admin.get("/accounts", (_, res) => res.json({ users: auth.listAccounts(), minPasswordLength: auth.MIN_PASSWORD }));
+admin.put("/accounts/:username/password", (req, res) => {
+  const r = auth.resetUserPassword(req.params.username, req.body?.password);
+  if (r.error) return res.status(r.status).json({ error: r.error });
+  monitor.recordAudit(actor(req), "Reset dashboard password", req.params.username + (r.loggedOut ? " (logged out)" : ""));
+  res.json({ success: true, loggedOut: r.loggedOut });
+});
+admin.post("/password", (req, res) => {
+  const r = auth.changeAdminPassword(req.body?.currentPassword, req.body?.newPassword);
+  if (r.error) return res.status(r.status).json({ error: r.error });
+  monitor.recordAudit(actor(req), "Changed the admin password", "other admin sessions signed out");
+  res.json({ success: true, token: r.token, expiresInMs: r.expiresInMs });
 });
 
 // ── Client roster: parent/child, Interactive + Market Data keys ──
@@ -892,11 +911,14 @@ app.post("/api/subscribe", async (req, res) => {
   await subscribeTokens(tokens, segments, `ui:${req.user.username}`);
   res.json({ status: "subscribed", count: tokens.length });
 });
+// { "all": true } releases every token this user's dashboard holds — sent when
+// the dashboard opens, so tokens left over from an earlier page don't keep streaming.
 app.post("/api/unsubscribe", async (req, res) => {
-  const { tokens } = req.body || {};
-  if (!Array.isArray(tokens) || !tokens.length) return res.json({ status: "no tokens" });
-  await unsubscribeTokens(tokens, `ui:${req.user.username}`);
-  res.json({ status: "unsubscribed" });
+  const owner = `ui:${req.user.username}`;
+  const tokens = req.body?.all === true ? tokensOwnedBy(owner) : req.body?.tokens;
+  if (!Array.isArray(tokens) || !tokens.length) return res.json({ status: "no tokens", count: 0 });
+  await unsubscribeTokens(tokens, owner);
+  res.json({ status: "unsubscribed", count: tokens.length });
 });
 
 // ── Automated strategies assigned to the logged-in user ──

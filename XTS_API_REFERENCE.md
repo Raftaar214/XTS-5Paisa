@@ -72,7 +72,7 @@ Sending the same credentials with `"force": true` ends the other session and ret
 { "success": true, "loggedOutOther": true, "message": "The other session was logged out. Log in again to continue." }
 ```
 
-A request made with an ended session's token gets `401` with `code` `SESSION_REPLACED` (another login took over), `SESSION_ENDED` (logged out or ended by the admin) or `UNAUTHORIZED`, and its quote WebSocket is closed. Sessions are stored in `data/sessions.json` and survive restarts.
+A request made with an ended session's token gets `401` with `code` `SESSION_REPLACED` (another login took over), `SESSION_ENDED` (logged out or ended by the admin), `PASSWORD_RESET` (the admin reset the password) or `UNAUTHORIZED`, and its quote WebSocket is closed. Sessions are stored in `data/sessions.json` and survive restarts.
 
 ### Logout
 
@@ -359,6 +359,19 @@ Authorization: Bearer signed-admin-token
 
 `GET` returns `[{ username, ip, since, userAgent, lastSeenAt }]`. `DELETE` ends that user's session (their dashboard is signed out with `SESSION_ENDED`).
 
+### Users and Passwords
+
+```http
+GET  /api/admin/accounts
+PUT  /api/admin/accounts/:username/password     { "password": "new-password" }
+POST /api/admin/password                        { "currentPassword": "…", "newPassword": "…" }
+Authorization: Bearer signed-admin-token
+```
+
+`/accounts` returns `{ users: [{ username, passwordSetBy: ".env" | "admin console", passwordChangedAt, session: { ip, since, userAgent, lastSeenAt } | null }], minPasswordLength }` — never passwords.
+
+Resetting a user's password (at least 8 characters) logs that user out; their old token gets `401` with code `PASSWORD_RESET`. Changing the admin password needs the current one (a wrong one is `400`), returns a fresh admin `token` for the console that made the change, and makes every older admin token invalid. Both are stored scrypt-hashed in `data/passwords.json` and take priority over `.env`.
+
 ### Margins and Trade Books
 
 ```http
@@ -494,6 +507,8 @@ Request:
   "tokens": ["12345"]
 }
 ```
+
+`{ "all": true }` instead releases every token this user's dashboard holds (the dashboard sends it when it opens). A user's tokens are also released when their session ends. The dashboard subscribes leg tokens only while at least one client is logged in.
 
 ### Local Quote WebSocket
 

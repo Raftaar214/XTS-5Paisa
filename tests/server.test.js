@@ -80,11 +80,13 @@ mockModule("./xtsApi.js", {
   getPositions: async () => [],
 });
 let priceCb = null;
+const owned = new Map(); // owner → Set(token), like the real Marketsocket
 mockModule("./Marketsocket.js", {
   loginMarketData: async () => null,
   connectMarketSocket: () => {},
-  subscribeTokens: async () => {},
-  unsubscribeTokens: async () => {},
+  subscribeTokens: async (tokens, _segs, owner) => { if (!owned.has(owner)) owned.set(owner, new Set()); tokens.forEach(t => owned.get(owner).add(String(t))); },
+  unsubscribeTokens: async (tokens, owner) => { tokens.forEach(t => owned.get(owner)?.delete(String(t))); },
+  tokensOwnedBy: owner => [...(owned.get(owner) || [])],
   onPriceUpdate: cb => { priceCb = cb; },
   getLivePrices: () => ({ "123": { bid: 100, ask: 101, ltp: 100.5, hasData: true } }),
   getMarketStatus: () => ({ loggedIn: false, socketConnected: false, subscribedTokens: 0 }),
@@ -721,6 +723,87 @@ test("a manual execution logs every client's result on the server, filled ones t
   assert.ok(ev.some(e => /EXECUTE/.test(e.message)), "the request itself is logged");
   assert.ok(ev.some(e => /FILLED/.test(e.message) && /PAPER-/.test(e.message)), "filled results are logged with order IDs");
   await call("PUT", "/api/admin/settings", { token: admin, body: { tradingHalted: true } });
+});
+
+// ── leg subscriptions ──
+test("'unsubscribe all' releases every token this user's dashboard holds, and no one else's", async () => {
+  const t = await userToken("alice", "alice-pw");
+  await call("POST", "/api/subscribe", { token: t, body: { tokens: ["111", "222"], segments: ["NSE_FO", "NSE_FO"] } });
+  owned.set("strategy:x", new Set(["111"]));
+  const r = await call("POST", "/api/unsubscribe", { token: t, body: { all: true } });
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.data.count, 2);
+  assert.deepStrictEqual([...owned.get("ui:alice")], []);
+  assert.deepStrictEqual([...owned.get("strategy:x")], ["111"], "a strategy's token is untouched");
+});
+
+test("logging out releases that user's leg tokens", async () => {
+  const t = await userToken("alice", "alice-pw");
+  await call("POST", "/api/subscribe", { token: t, body: { tokens: ["333"], segments: ["NSE_FO"] } });
+  await call("POST", "/api/auth/logout", { token: t });
+  assert.deepStrictEqual([...owned.get("ui:alice")], []);
+});
+
+// ── Users tab: logins and passwords ──
+test("admin lists dashboard users with login state, never passwords", async () => {
+  const admin = await adminToken();
+  await userToken("alice", "alice-pw");
+  const r = await call("GET", "/api/admin/accounts", { token: admin });
+  assert.strictEqual(r.status, 200);
+  const alice = r.data.users.find(u => u.username === "alice");
+  assert.ok(alice.session && alice.session.since, "alice shows as logged in");
+  assert.strictEqual(alice.passwordSetBy, ".env");
+  assert.ok(!JSON.stringify(r.data).includes("alice-pw"), "no password in the response");
+  assert.strictEqual((await call("GET", "/api/admin/accounts", { token: await userToken("alice", "alice-pw") })).status, 401, "admin only");
+});
+
+test("admin resets a user's password: the user is logged out, only the new password works", async () => {
+  const admin = await adminToken();
+  const old = await userToken("alice", "alice-pw");
+  let r = await call("PUT", "/api/admin/accounts/alice/password", { token: admin, body: { password: "short" } });
+  assert.strictEqual(r.status, 400, "too short");
+  r = await call("PUT", "/api/admin/accounts/nobody/password", { token: admin, body: { password: "long-enough-pw" } });
+  assert.strictEqual(r.status, 404);
+
+  r = await call("PUT", "/api/admin/accounts/alice/password", { token: admin, body: { password: "alice-new-pw-1" } });
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.data.loggedOut, true);
+  r = await call("GET", "/api/clients", { token: old });
+  assert.strictEqual(r.status, 401);
+  assert.strictEqual(r.data.code, "PASSWORD_RESET");
+
+  assert.strictEqual((await call("POST", "/api/auth/login", { body: { username: "alice", password: "alice-pw" } })).status, 401, "old password refused");
+  r = await call("POST", "/api/auth/login", { body: { username: "alice", password: "alice-new-pw-1" } });
+  assert.strictEqual(r.status, 200);
+  userTokens.alice = r.data.token;
+
+  const saved = fs.readFileSync(path.join(dataDir, "passwords.json"), "utf8");
+  assert.ok(!saved.includes("alice-new-pw-1"), "stored hashed, not in plain text");
+  const acc = (await call("GET", "/api/admin/accounts", { token: admin })).data.users.find(u => u.username === "alice");
+  assert.strictEqual(acc.passwordSetBy, "admin console");
+});
+
+test("admin changes its own password: other admin sessions end, the old password stops working", async () => {
+  const other = await adminToken();
+  const me = await adminToken();
+  let r = await call("POST", "/api/admin/password", { token: me, body: { currentPassword: "wrong", newPassword: "root-new-pw-1" } });
+  assert.strictEqual(r.status, 400, "a wrong current password is refused (400, so the console stays signed in)");
+
+  // tokens are time-stamped in ms; make sure the change is strictly later
+  await new Promise(res => setTimeout(res, 5));
+  r = await call("POST", "/api/admin/password", { token: me, body: { currentPassword: "root-pw", newPassword: "root-new-pw-1" } });
+  assert.strictEqual(r.status, 200);
+  const fresh = r.data.token;
+  assert.ok(fresh);
+  assert.strictEqual((await call("GET", "/api/admin/verify", { token: fresh })).status, 200, "the console that changed it stays in");
+  assert.strictEqual((await call("GET", "/api/admin/settings", { token: other })).status, 401, "older admin tokens are signed out");
+  assert.strictEqual((await call("POST", "/api/admin/login", { body: { username: "root", password: "root-pw" } })).status, 401);
+  assert.strictEqual((await call("POST", "/api/admin/login", { body: { username: "root", password: "root-new-pw-1" } })).status, 200);
+
+  // the newly issued token can change it again
+  await new Promise(res => setTimeout(res, 5));
+  r = await call("POST", "/api/admin/password", { token: fresh, body: { currentPassword: "root-new-pw-1", newPassword: "root-pw-restored" } });
+  assert.strictEqual(r.status, 200);
 });
 
 test("no order ever reached the (fake) broker", () => {

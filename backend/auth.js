@@ -9,6 +9,9 @@
 //                      console (Ctrl+Shift+Space): client roster & API keys,
 //                      kill switch, engine settings, risk limits, monitoring.
 //
+// Passwords set from the Admin console (user reset, admin change) are stored
+// scrypt-hashed in data/passwords.json and take priority over .env.
+//
 // Issues signed, stateless bearer tokens (HMAC-SHA256, JWT-style) using
 // Node's built-in crypto only. Each token carries a scope ("user" or
 // "admin"); a dashboard token never opens admin routes and vice versa.
@@ -49,6 +52,29 @@ function endSession(username, reason) {
   return true;
 }
 function onSessionEnded(fn) { revokeListeners.add(fn); return () => revokeListeners.delete(fn); }
+
+// ── Passwords changed in the Admin console ─────────────────────
+// data/passwords.json: { users: { name: { salt, hash, changedAt } }, admin: { … } }
+const PASSWORDS_FILE = path.join(process.env.XTS_DATA_DIR || path.join(__dirname, "data"), "passwords.json");
+let overrides = readJson(PASSWORDS_FILE, {}) || {};
+if (!overrides.users) overrides.users = {};
+const MIN_PASSWORD = 8;
+
+function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
+  return { salt, hash: crypto.scryptSync(String(password), salt, 64).toString("hex") };
+}
+function hashMatches(rec, password) {
+  const got = Buffer.from(hashPassword(password, rec.salt).hash, "hex");
+  const want = Buffer.from(String(rec.hash), "hex");
+  return got.length === want.length && crypto.timingSafeEqual(got, want);
+}
+function savePasswords() { writeJsonAtomic(PASSWORDS_FILE, overrides); }
+function passwordProblem(p) {
+  if (typeof p !== "string" || p.length < MIN_PASSWORD) return `Password must be at least ${MIN_PASSWORD} characters`;
+  if (p.length > 200) return "Password is too long";
+  if (p.trim() !== p) return "Password cannot start or end with a space";
+  return null;
+}
 
 const USER_TTL_MS  = 12 * 60 * 60 * 1000; // 12 hours
 const USER_TTL_MS_FOR_SESSIONS = USER_TTL_MS;
@@ -134,7 +160,9 @@ function userTokenProblem(token) {
   if (!data || data.scope !== "user") return { code: "UNAUTHORIZED" };
   const sess = activeSession(data.username);
   if (!sess || sess.sid !== data.sid) {
-    const replaced = sess || endedReasons.get(data.sid) === "replaced";
+    const why = endedReasons.get(data.sid);
+    if (!sess && why === "password") return { code: "PASSWORD_RESET", data };
+    const replaced = sess || why === "replaced";
     return { code: replaced ? "SESSION_REPLACED" : "SESSION_ENDED", data };
   }
   return null;
@@ -173,6 +201,16 @@ function extractToken(req) {
 }
 
 // POST /api/auth/login  { username, password } -> { success, token }
+// Password check for one dashboard user: the console-set password if any, else .env.
+function userPasswordOk(user, password) {
+  const rec = overrides.users[user.username];
+  return rec ? hashMatches(rec, password) : safeEqual(user.password, password);
+}
+function adminPasswordOk(password) {
+  return overrides.admin ? hashMatches(overrides.admin, password) : safeEqual(ADMIN.password, password);
+}
+const DUMMY = hashPassword("not-a-real-password");
+
 function login(req, res) {
   const ip = clientIp(req);
   if (isRateLimited(ip)) {
@@ -183,12 +221,12 @@ function login(req, res) {
   }
 
   const { username, password, force } = req.body || {};
-  // Check every user (no early exit) so timing doesn't reveal which names exist.
-  let match = null;
-  for (const u of USERS) {
-    const ok = safeEqual(u.username, username) & safeEqual(u.password, password);
-    if (ok && !match) match = u;
-  }
+  // Compare every username (no early exit), then check one password — a
+  // dummy hash when the name is unknown — so timing doesn't reveal names.
+  let user = null;
+  for (const u of USERS) if (safeEqual(u.username, username) && !user) user = u;
+  const passOk = user ? userPasswordOk(user, password) : (hashMatches(DUMMY, password), false);
+  const match = passOk ? user : null;
   if (match) {
     clearAttempts(ip);
     const current = activeSession(match.username);
@@ -229,7 +267,8 @@ function adminLogin(req, res) {
     return res.status(503).json({ error: "Admin console is disabled. Set ADMIN_USERNAME and ADMIN_PASSWORD in backend/.env and restart the backend." });
   }
   const { username, password } = req.body || {};
-  const ok = safeEqual(ADMIN.username, username) & safeEqual(ADMIN.password, password);
+  const nameOk = safeEqual(ADMIN.username, username);
+  const ok = adminPasswordOk(password) && nameOk;
   if (ok) {
     clearAttempts(ip);
     const { token, ttl } = createToken(ADMIN.username, "admin");
@@ -270,15 +309,25 @@ function listSessions() {
 
 // GET /api/admin/verify
 function adminVerify(req, res) {
-  const data = verifyToken(extractToken(req));
-  if (!data || data.scope !== "admin") return res.status(401).json({ valid: false });
+  const data = adminTokenData(extractToken(req));
+  if (!data) return res.status(401).json({ valid: false });
   res.json({ valid: true, username: data.username });
+}
+
+// An admin token is valid only if issued after the last admin password change.
+function adminTokenData(token) {
+  const data = verifyToken(token);
+  if (!data || data.scope !== "admin") return null;
+  const changed = overrides.admin?.changedAt ? new Date(overrides.admin.changedAt).getTime() : 0;
+  if (changed && !(data.iat >= changed)) return null;
+  return data;
 }
 
 // Express middleware — dashboard routes
 const SESSION_MESSAGES = {
   SESSION_REPLACED: "You were logged out — this user ID logged in on another system.",
   SESSION_ENDED: "Your session has ended — please log in again.",
+  PASSWORD_RESET: "Your password was reset by the admin — log in with the new password.",
   UNAUTHORIZED: "Unauthorized — please log in again.",
 };
 function requireAuth(req, res, next) {
@@ -291,8 +340,8 @@ function requireAuth(req, res, next) {
 
 // Express middleware — admin routes
 function requireAdmin(req, res, next) {
-  const data = verifyToken(extractToken(req));
-  if (!data || data.scope !== "admin") return res.status(401).json({ error: "Admin session required — press Ctrl+Shift+Space and log in." });
+  const data = adminTokenData(extractToken(req));
+  if (!data) return res.status(401).json({ error: "Admin session required — press Ctrl+Shift+Space and log in." });
   req.admin = data;
   next();
 }
@@ -302,8 +351,47 @@ function listUsernames() {
   return USERS.map(u => u.username);
 }
 
+// Admin "Users" tab: every dashboard user with login state — never passwords.
+function listAccounts() {
+  const live = new Map(listSessions().map(s => [s.username, s]));
+  return USERS.map(u => ({
+    username: u.username,
+    passwordSetBy: overrides.users[u.username] ? "admin console" : ".env",
+    passwordChangedAt: overrides.users[u.username]?.changedAt || null,
+    session: live.get(u.username) || null,
+  }));
+}
+
+// Admin resets a user's password: saved hashed, that user is logged out.
+function resetUserPassword(username, password) {
+  const user = USERS.find(u => u.username === username);
+  if (!user) return { status: 404, error: "No such dashboard user" };
+  const bad = passwordProblem(password);
+  if (bad) return { status: 400, error: bad };
+  overrides.users[username] = { ...hashPassword(password), changedAt: new Date().toISOString() };
+  savePasswords();
+  const loggedOut = endSession(username, "password");
+  return { status: 200, loggedOut };
+}
+
+// Admin changes its own password (current one required). Every admin token
+// issued before now stops working, so other admin sessions are signed out.
+function changeAdminPassword(currentPassword, newPassword) {
+  if (!ADMIN) return { status: 503, error: "Admin console is disabled" };
+  if (!adminPasswordOk(currentPassword)) return { status: 400, error: "Current admin password is wrong" };
+  const bad = passwordProblem(newPassword);
+  if (bad) return { status: 400, error: bad };
+  if (adminPasswordOk(newPassword)) return { status: 400, error: "The new password is the same as the current one" };
+  const changedAt = new Date().toISOString();
+  overrides.admin = { ...hashPassword(newPassword), changedAt };
+  savePasswords();
+  const { token, ttl } = createToken(ADMIN.username, "admin");
+  return { status: 200, token, expiresInMs: ttl };
+}
+
 module.exports = {
   login, logout, adminLogin, verify, adminVerify, requireAuth, requireAdmin,
   listUsernames, verifyToken, verifyUserToken, safeEqual,
   listSessions, endSession, onSessionEnded,
+  listAccounts, resetUserPassword, changeAdminPassword, MIN_PASSWORD,
 };

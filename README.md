@@ -63,6 +63,7 @@ XTS 5paisa/
     |   |-- AuthGate.jsx       Login gate + Ctrl+Shift+Space admin shortcut
     |   |-- LoginPage.jsx      Login page (single-session warning)
     |   |-- AdminConsole.jsx   Admin console (monitor, execution & limits)
+|   |-- AdminUsers.jsx     Users: who is logged in, password resets
     |   |-- AdminClients.jsx   Admin client roster and API keys
     |   |-- AdminStrategies.jsx  Strategy upload, assignment, allocations
     |   |-- AdminTradeBooks.jsx  Daily broker trade books
@@ -274,6 +275,7 @@ The dashboard login is separate from the broker API login.
 Press **Ctrl+Shift+Space** anywhere in the app (login screen or dashboard) and log in with the admin credentials.
 
 - **Monitor**: PAPER/LIVE and halt state, market-data feed health (ticks per minute, last tick, re-logins, session takeover warning), instruments, server uptime, every client's status, logged-in dashboard users (with **End session**), client margins, execute-to-fill latency, recent executions and the admin audit trail. Buttons to restart the market feed, refresh instruments, and disconnect or log out all clients.
+- **Users**: every dashboard login — who is logged in right now (IP, since, last active), **Reset password** for any user (that user is logged out and must use the new password), **Log out** a user, and **change the admin password** (current password required; every other admin session is signed out). Changed passwords are stored scrypt-hashed in `backend/data/passwords.json` and replace the ones in `.env`. Forgot the admin password? Delete the `admin` entry in that file and restart; the `.env` password works again. New users are still added in `.env` (`APP_USER{n}_*`).
 - **Clients**: add, edit and delete parent and child clients, set Interactive and Market Data API keys (only ever shown masked), multiplier and capital, assign a client to a dashboard login, and log in / connect / enable any client.
 - **Strategies**: upload, assign, allocate capital, control (see below).
 - **Trade Books**: each client's broker trade book saved per day, with CSV.
@@ -351,7 +353,7 @@ The parent provides market data access. The parent and every child can participa
 1. The backend downloads the instrument master from Upstox (`INSTRUMENT_URL`).
 2. The backend logs in to XTS Market Data using the parent client's market credentials.
 3. The backend connects to the XTS market data socket (`publishFormat: JSON`, `broadcastMode: Full`) and receives every touchline/depth tick as it happens — no polling.
-4. Each leg subscribes its own token through `POST /api/subscribe`; changing or removing a leg unsubscribes the old token (`POST /api/unsubscribe`). Tokens are reference-counted per owner (each dashboard and each strategy), so a token another leg or strategy still needs stays subscribed, and a removed token's price is cleared at once.
+4. Leg prices start only after at least one client is logged in (**Login All**); until then no leg token is subscribed and Ask/Bid/LTP show "—". **Logout All** unsubscribes them again, and so does logging out of the dashboard. When the dashboard opens it first releases any tokens an earlier page left subscribed. Strategies subscribe their own tokens and are not affected. Each leg subscribes its own token through `POST /api/subscribe`; changing or removing a leg unsubscribes the old token (`POST /api/unsubscribe`). Tokens are reference-counted per owner (each dashboard and each strategy), so a token another leg or strategy still needs stays subscribed, and a removed token's price is cleared at once.
 5. The backend pushes bid, ask, and LTP to the dashboard over `/ws` (dashboard token required). The browser applies updates once per animation frame, and re-subscribes every leg whenever the socket reconnects (500 ms first retry).
 6. **Recovery**: if XTS ends the market session (server disconnect, logout, `Invalid Token`), the backend logs in again, reconnects, and re-subscribes every token automatically. Three or more forced re-logins in 5 minutes usually means another program is logged in with the same Market Data key; the monitor shows "Session taken over" and the backend waits 30 s between attempts instead of fighting it. Close the other program to fix it.
 

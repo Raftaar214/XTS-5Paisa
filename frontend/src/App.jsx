@@ -223,6 +223,7 @@ const PortfolioSection = ({
   onRefreshInstruments, isRefreshingInstruments,
   execConfig,
   wsEpoch,
+  feedOn = false,      // prices only after a client is logged in (Login All)
   log = () => {},
 }) => {
   const [numLegs, setNumLegs] = useState(1);
@@ -234,6 +235,7 @@ const PortfolioSection = ({
   const [legs, setLegs]       = useState([]);
   const fileRef  = useRef(null);
   const subRef   = useRef(new Set());
+  const clearedRef = useRef(false);   // leftover tokens from an earlier page released?
   const epochRef = useRef(wsEpoch);
   const tokenKey = legs
     .map(l => String(l?.exchange_token || ""))
@@ -256,16 +258,25 @@ const PortfolioSection = ({
 
     const syncSubscriptions = async () => {
 
-        const current = new Set(
-            legs
-                .map(l => l?.exchange_token?.toString())
-                .filter(Boolean)
-        );
+        // Nothing is subscribed until a client is logged in (Login All);
+        // after Logout All every leg token is unsubscribed again.
+        const current = new Set(feedOn
+            ? legs.map(l => l?.exchange_token?.toString()).filter(Boolean)
+            : []);
 
         // After a quote-socket (re)connect the backend may have restarted and
         // forgotten our subscriptions: re-send every current token.
         if (epochRef.current !== wsEpoch) { epochRef.current = wsEpoch; subRef.current = new Set(); }
         const previous = subRef.current;
+
+        // First run on this page: drop whatever an earlier page of this user left subscribed.
+        if (!clearedRef.current) {
+            try {
+                const r = await fetch(`${API}/api/unsubscribe`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ all: true }) });
+                if (r.ok) { clearedRef.current = true; previous.clear(); }
+            } catch { /* retried on the next sync */ }
+            if (cancelled) return;
+        }
 
         const toSubscribe = [...current].filter(
             token => !previous.has(token)
@@ -345,7 +356,15 @@ if (toSubscribe.length) {
         clearTimeout(timer);
     };
 
-}, [tokenKey, wsEpoch]);
+}, [tokenKey, wsEpoch, feedOn]);
+
+  // Log the start / stop of leg prices once per change.
+  const feedRef = useRef(feedOn);
+  useEffect(() => {
+    if (feedRef.current === feedOn) return;
+    feedRef.current = feedOn;
+    log(feedOn ? "Client logged in — leg prices started" : "No client logged in — leg prices stopped");
+  }, [feedOn]);
 
   const handleLegChange = (idx, field, value) => {
     if (!marketData) return;
@@ -370,7 +389,7 @@ if (toSubscribe.length) {
   // All tokens valid + relevant quote available for each leg
   const allTokensValid = legs.length>0 && legs.every(l=>l?.exchange_token&&l.exchange_token!=="");
   const allHaveQuote   = legs.every(l => {
-    const q = quoteMap[String(l?.exchange_token||"").trim()];
+    const q = feedOn ? quoteMap[String(l?.exchange_token||"").trim()] : null;
     if (!q) return false;
     return (l.side||"Buy")==="Buy" ? (q.ask||0)>0 : (q.bid||0)>0;
   });
@@ -490,7 +509,7 @@ if (toSubscribe.length) {
               const symD = segD.data?.[leg.symbol]       || {types:[]};
               const typD = symD.data?.[leg.type]         || {expiries:[]};
               const expD = typD.data?.[leg.expiry]       || {strikes:[]};
-              const q    = quoteMap[String(leg.exchange_token||"").trim()] || {bid:0,ask:0,ltp:0};
+              const q    = (feedOn && quoteMap[String(leg.exchange_token||"").trim()]) || {bid:0,ask:0,ltp:0};
               const tokOk = leg.exchange_token && leg.exchange_token !== "Unknown Key" && leg.exchange_token !== "";
               const askOk = (q.ask||0) > 0;
               const bidOk = (q.bid||0) > 0;
@@ -573,7 +592,8 @@ if (toSubscribe.length) {
             {" "}{execConfig.engine.bufferPct}% buffer, DAY LIMIT order, {execConfig.engine.fillTimeout}s fill timeout, {execConfig.engine.maxRetries} {execConfig.engine.maxRetries === 1 ? "retry" : "retries"}
           </div>
           <div className="text-amber-500 mt-0.5 h-5 overflow-hidden">
-            {allTokensValid && !allHaveQuote && (
+            {!feedOn ? "Prices start after Login All — no token is subscribed until a client is logged in"
+             : allTokensValid && !allHaveQuote && (
               legs.some(l => quoteMap[String(l?.exchange_token||"").trim()]?.hasData)
                 ? "Selected contract has no liquidity right now (no bid / ask)"
                 : "Waiting for bid/ask from the market feed…"
@@ -1319,6 +1339,7 @@ export default function App() {
             }}
             onDownload={downloadTradeBook}
             isAllLogged={isAllLogged} isAllConnected={isAllConnected}
+            feedOn={clients.some(c => c.isLogged)}
             isLoggingAll={isLoggingAll} isConnectingAll={isConnectingAll}
             onExecute={executePortfolio} isExecuting={isExecuting}
             onRefreshInstruments={refreshInstruments}

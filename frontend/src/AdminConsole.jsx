@@ -1,18 +1,20 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
   X, Loader, ShieldAlert, Activity, Users, SlidersHorizontal, LogOut,
-  RefreshCw, OctagonX, PlayCircle, PowerOff, Radio, Bot, BookOpen, Timer,
+  RefreshCw, OctagonX, PlayCircle, PowerOff, Radio, Bot, BookOpen, Timer, UserCog,
 } from "lucide-react";
 import AdminClients from "./AdminClients.jsx";
 import AdminStrategies from "./AdminStrategies.jsx";
 import AdminTradeBooks from "./AdminTradeBooks.jsx";
 import AdminMargins from "./AdminMargins.jsx";
+import AdminUsers from "./AdminUsers.jsx";
 import { API_BASE, adminFetch, getAdminToken, setAdminToken, clearAdminToken } from "./authFetch.js";
 
 // Admin console — opened anywhere with Ctrl+Shift+Space.
 // Separate admin login (ADMIN_USERNAME / ADMIN_PASSWORD in backend/.env).
 //   Monitor             live health: trading state, market feed, instruments,
 //                       clients, recent executions, admin audit trail
+//   Users               dashboard logins: who is logged in, password resets, admin password
 //   Clients             parent/child roster, API keys, assignment, sessions
 //   Execution & Limits  kill switch, engine parameters, risk limits
 
@@ -550,6 +552,7 @@ function ExecutionControls() {
 // ─────────────────────────────────────────────────────────────
 const TABS = [
   ["monitor",   "Monitor",            Activity],
+  ["users",     "Users",              UserCog],
   ["clients",   "Clients",            Users],
   ["strategies","Strategies",         Bot],
   ["tradebooks","Trade Books",        BookOpen],
@@ -615,6 +618,7 @@ export default function AdminConsole({ onClose }) {
           </div>
           <div className="flex-1 overflow-auto p-4">
             {tab === "monitor"   && <Monitor />}
+            {tab === "users"     && <AdminUsers />}
             {tab === "clients"   && <AdminClients />}
             {tab === "strategies"&& <AdminStrategies />}
             {tab === "tradebooks"&& <AdminTradeBooks />}

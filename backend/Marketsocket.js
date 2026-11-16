@@ -273,6 +273,11 @@ async function subscribeTokens(tokens, segmentsArray, owner = "ui") {
   }
 }
 
+// Every token one owner (a dashboard user, a strategy) currently holds.
+function tokensOwnedBy(owner) {
+  return [...owners].filter(([, set]) => set.has(owner)).map(([t]) => t);
+}
+
 async function unsubscribeTokens(tokens, owner = "ui") {
   if (!tokens?.length) return;
 
@@ -402,6 +407,6 @@ function getLivePrices() {
 }
 
 module.exports = {
-  loginMarketData, connectMarketSocket, subscribeTokens, unsubscribeTokens,
+  loginMarketData, connectMarketSocket, subscribeTokens, unsubscribeTokens, tokensOwnedBy,
   onPriceUpdate, getLivePrices, getMarketStatus, parseQuote,
 };
