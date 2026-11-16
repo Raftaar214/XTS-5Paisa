@@ -14,7 +14,8 @@ require("dotenv").config();
 const fs   = require("fs");
 const path = require("path");
 
-const DATA_DIR  = path.join(__dirname, "data");
+// XTS_DATA_DIR lets tests point at a throwaway folder instead of the real roster.
+const DATA_DIR  = process.env.XTS_DATA_DIR || path.join(__dirname, "data");
 const DATA_FILE = path.join(DATA_DIR, "clients.json");
 const DEFAULT_ROOT_URL = process.env.XTS_INTERACTIVE_URL || "https://xtsmum.5paisa.com";
 
@@ -34,6 +35,7 @@ function persist() {
     name:              c.name,
     role:              c.role,
     multiplier:        c.multiplier,
+    capital:           c.capital ?? null,
     rootUrl:           c.rootUrl,
     source:            c.source,
     assignedTo:        c.assignedTo || "",
@@ -151,7 +153,7 @@ function mask(v) {
 // masked; real values are never sent back down once saved.
 function clientManagementView(c) {
   return {
-    id: c.id, name: c.name, role: c.role, multiplier: c.multiplier,
+    id: c.id, name: c.name, role: c.role, multiplier: c.multiplier, capital: c.capital ?? null,
     rootUrl: c.rootUrl, source: c.source, assignedTo: c.assignedTo || "",
     enabled: c.enabled, isLogged: c.isLogged, isConnected: c.isConnected,
     interactiveKeyMasked:    mask(c.interactiveKey),
@@ -177,6 +179,14 @@ function isVisibleTo(client, username) {
 // ─────────────────────────────────────────────────────────────
 // CRUD (used by the User Management panel)
 // ─────────────────────────────────────────────────────────────
+// Account capital in ₹ (used by capital-based sizing). Empty = not set.
+function capitalOf(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  if (!(n >= 0) || n > 1e13) throw fail(400, "Capital must be a positive amount in ₹");
+  return n;
+}
+
 function fail(status, message) { return Object.assign(new Error(message), { status }); }
 
 function addClient(input = {}) {
@@ -205,6 +215,7 @@ function addClient(input = {}) {
     const client = runtimeShape({
       id, name, role, multiplier: 1, rootUrl, source,
       assignedTo: String(input.assignedTo || "").trim(),
+      capital: capitalOf(input.capital),
       interactiveKey, interactiveSecret, marketKey, marketSecret,
       enabled: input.enabled !== undefined ? Boolean(input.enabled) : true,
     });
@@ -247,6 +258,7 @@ function updateClient(id, input = {}) {
   if (input.source  !== undefined) c.source  = String(input.source).toUpperCase();
   if (input.enabled !== undefined) c.enabled = Boolean(input.enabled);
   if (input.assignedTo !== undefined) c.assignedTo = String(input.assignedTo).trim();
+  if (input.capital    !== undefined) c.capital    = capitalOf(input.capital);
 
   if (c.role === "CHILD") {
     if (input.multiplier !== undefined) {

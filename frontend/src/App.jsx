@@ -1,43 +1,44 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-
-const decodeQuotePacket = (data) => {
-  if (!data || typeof data === "string") return {};
-  if (data instanceof ArrayBuffer) {
-    const view = new Uint8Array(data);
-    const out = {};
-    let offset = 1;
-    while (offset < view.length) {
-      if (view.length - offset < 2) break;
-      const tokenLength = (view[offset] << 8) | view[offset + 1];
-      offset += 2;
-      if (view.length - offset < tokenLength + 4) break;
-      const token = new TextDecoder().decode(view.slice(offset, offset + tokenLength));
-      offset += tokenLength;
-      const payloadLength = (view[offset] << 24) | (view[offset + 1] << 16) | (view[offset + 2] << 8) | view[offset + 3];
-      offset += 4;
-      if (view.length - offset < payloadLength) break;
-      const payload = JSON.parse(new TextDecoder().decode(view.slice(offset, offset + payloadLength)));
-      offset += payloadLength;
-      out[token] = payload;
-    }
-    return out;
-  }
-  return {};
-};
 import {
   Upload, Download, LogIn, LogOut, Power, PowerOff, Loader,
   Terminal, Activity, Users, ShieldCheck, Database,
-  LayoutList, BookOpen, Briefcase,
+  LayoutList, BookOpen, Briefcase, RefreshCw, OctagonX, Bot,
 } from "lucide-react";
-import UserManagement from "./UserManagement.jsx";
-import { API_BASE } from "./authFetch.js";
+import { API_BASE, WS_URL } from "./config.js";
+import { getToken } from "./authFetch.js";
+import { downloadFile, todayIst, rowsToCsv, saveText } from "./download.js";
+
+// CSV columns for the client-card strategy views. Broker views (orders,
+// trades, positions) export every field the broker returned.
+const CSV_COLUMNS = {
+  algo: [
+    ["strategyName", "Strategy"], ["mode", "Mode"], ["orderId", "Entry Order ID"], ["exitOrderId", "Exit Order ID"],
+    ["tradingSymbol", "Instrument"], ["token", "Token"], ["side", "Side"], ["qty", "Qty"],
+    ["entryPrice", "Entry"], ["ltp", "LTP"], ["stopPrice", "Stop"], ["status", "Status"], ["exitReason", "Exit Reason"],
+    ["exitPrice", "Exit"], ["unrealized", "Unrealized P&L"], ["pnl", "Realized P&L"], ["slot", "Slot"],
+    ["entryTime", "Entry Time"], ["exitTime", "Exit Time"],
+  ],
+  algoorders: [
+    ["date", "Date"], ["time", "Time"], ["strategy", "Strategy"], ["mode", "Mode"], ["orderId", "Order ID"],
+    ["tradingSymbol", "Instrument"], ["token", "Token"], ["side", "Side"], ["qty", "Qty"], ["price", "Price"],
+    ["reason", "Reason"], ["pnl", "P&L"], ["status", "Status"],
+  ],
+};
+const CSV_NAMES = { orders: "order-book", trades: "trade-book", positions: "positions", algo: "algo-positions", algoorders: "algo-orders" };
+import StrategyPanel from "./StrategyPanel.jsx";
 
 // ─────────────────────────────────────────────────────────────
 // CONFIG
 // ─────────────────────────────────────────────────────────────
 const API   = API_BASE;
-const WS    = "ws://localhost:3002";
 const SIDES = ["Buy", "Sell"];
+
+// Shown until /api/execution/config answers; mirrors backend defaults.
+const DEFAULT_EXEC_CONFIG = {
+  tradingMode: "PAPER", tradingHalted: false, haltReason: "",
+  engine: { bufferPct: 0.5, fillTimeout: 4, maxRetries: 1 },
+  limits: { maxLegs: 8 },
+};
 
 const authHeaders = () => {
   const token = localStorage.getItem("xts_dashboard_token");
@@ -62,19 +63,24 @@ const isFutureOrToday = (dateStr) => {
 // ─────────────────────────────────────────────────────────────
 // INSTRUMENT PROCESSING
 // ─────────────────────────────────────────────────────────────
+// Equity segments have no expiry/strike; their symbol is the trading symbol.
+const EQUITY_SEGMENTS = new Set(["NSE_EQ", "BSE_EQ"]);
+const noStrike = type => type === "FO" || type === "EQ";
+
+// The backend sends only the segments the admin allows.
 const buildMarketData = (rawData) => {
   const p = {};
   rawData.forEach(item => {
     let seg = item.segment;
+    if (!seg) return;
     if (seg === "MCX_FO") seg = "MCX";
-    if (!seg || !["NSE_FO","BSE_FO","MCX"].includes(seg)) return;
-    const sym = item.asset_symbol; if (!sym) return;
-    let type = item.instrument_type;
+    const equity = EQUITY_SEGMENTS.has(seg);
+    const sym = equity ? item.trading_symbol : item.asset_symbol; if (!sym) return;
+    let type = equity ? "EQ" : item.instrument_type;
     if (type === "F" || type === "FUT") type = "FO";
-    if (!["CE","PE","FO"].includes(type)) return;
+    if (!["CE","PE","FO","EQ"].includes(type)) return;
     let exp = "N/A";
-console.log(item.expiry, typeof item.expiry);
-if (item.expiry) {
+if (item.expiry && !equity) {
 
     // If API already sends YYYY-MM-DD, use it directly
     if (typeof item.expiry === "string") {
@@ -94,7 +100,9 @@ if (item.expiry) {
     if (!isFutureOrToday(exp))
         return;
 }
-    const str   = type === "FO" ? "N/A" : (item.strike_price != null ? String(item.strike_price) : "N/A");
+    const str   = noStrike(type) ? "N/A" : (item.strike_price != null ? String(item.strike_price) : "N/A");
+    // tick_size in the instrument master is in paise (5 = ₹0.05, 100 = ₹1)
+    const tick  = Number(item.tick_size) > 0 ? Number(item.tick_size) / 100 : 0.05;
     const token = item.exchange_token?.toString() || "";
     const lotSz =
   seg === "MCX"
@@ -104,8 +112,8 @@ if (item.expiry) {
     if (!p[seg][sym]) p[seg][sym]={};
     if (!p[seg][sym][type]) p[seg][sym][type]={};
     if (!p[seg][sym][type][exp]) p[seg][sym][type][exp]={ strikes:new Set(), details:{} };
-    if (type !== "FO") p[seg][sym][type][exp].strikes.add(str);
-    p[seg][sym][type][exp].details[str] = { token, lotSize: lotSz };
+    if (!noStrike(type)) p[seg][sym][type][exp].strikes.add(str);
+    p[seg][sym][type][exp].details[str] = { token, lotSize: lotSz, tick };
   });
 
   const f = {};
@@ -180,7 +188,7 @@ const sym = data[seg].symbols.includes(tSym)
 
   let str = "N/A";
 
-  if (t !== "FO")
+  if (!noStrike(t))
     str = av.includes(tStr)
       ? tStr
       : av[Math.floor(av.length / 2)] || "N/A";
@@ -199,6 +207,7 @@ const sym = data[seg].symbols.includes(tSym)
     strike: str,
     exchange_token: cd.token,
     lot_size: seg === "MCX" ? 1 : cd.lotSize,
+    tick_size: cd.tick || 0.05,
     lots: "1",
     side: "Buy",
   };
@@ -211,12 +220,21 @@ const PortfolioSection = ({
   onLoginAll, onLogoutAll, onConnectAll, onDisconnectAll, onUpload, onDownload,
   isAllLogged, isAllConnected, isLoggingAll, isConnectingAll,
   onExecute, isExecuting,
-  onOpenUserManagement,
+  onRefreshInstruments, isRefreshingInstruments,
+  execConfig,
+  wsEpoch,
+  log = () => {},
 }) => {
   const [numLegs, setNumLegs] = useState(1);
+  const maxLegs = Math.min(8, Math.max(1, Number(execConfig.limits?.maxLegs) || 8));
+  const halted  = !!execConfig.tradingHalted;
+
+  // Keep the selection inside the admin's leg limit.
+  useEffect(() => { if (numLegs > maxLegs) setNumLegs(maxLegs); }, [maxLegs, numLegs]);
   const [legs, setLegs]       = useState([]);
   const fileRef  = useRef(null);
   const subRef   = useRef(new Set());
+  const epochRef = useRef(wsEpoch);
   const tokenKey = legs
     .map(l => String(l?.exchange_token || ""))
     .join("|");
@@ -244,6 +262,9 @@ const PortfolioSection = ({
                 .filter(Boolean)
         );
 
+        // After a quote-socket (re)connect the backend may have restarted and
+        // forgotten our subscriptions: re-send every current token.
+        if (epochRef.current !== wsEpoch) { epochRef.current = wsEpoch; subRef.current = new Set(); }
         const previous = subRef.current;
 
         const toSubscribe = [...current].filter(
@@ -265,7 +286,7 @@ const PortfolioSection = ({
 
 if (toUnsubscribe.length) {
 
-    console.log("📴 Unsubscribe:", toUnsubscribe);
+    log(`📴 Unsubscribe token(s): ${toUnsubscribe.join(", ")}`);
 
     const res = await fetch(`${API}/api/unsubscribe`, {
         method: "POST",
@@ -295,7 +316,7 @@ if (toSubscribe.length) {
         return leg?.segment || "NSE_FO";
     });
 
-    console.log("📡 Subscribe:", toSubscribe);
+    log(`📡 Subscribe token(s): ${toSubscribe.join(", ")}`);
 
     const res = await fetch(`${API}/api/subscribe`, {
         method: "POST",
@@ -324,10 +345,11 @@ if (toSubscribe.length) {
         clearTimeout(timer);
     };
 
-}, [tokenKey]);
+}, [tokenKey, wsEpoch]);
 
   const handleLegChange = (idx, field, value) => {
     if (!marketData) return;
+    log(`L${idx + 1} ${field} → ${value}`);
     setLegs(prev => {
       const next = [...prev];
       const leg  = next[idx];
@@ -347,16 +369,6 @@ if (toSubscribe.length) {
 
   // All tokens valid + relevant quote available for each leg
   const allTokensValid = legs.length>0 && legs.every(l=>l?.exchange_token&&l.exchange_token!=="");
-  console.log("quoteMap =", quoteMap);
-
-legs.forEach(l => {
-    console.log(
-        "Token:",
-        l.exchange_token,
-        "Quote:",
-        quoteMap[String(l.exchange_token).trim()]
-    );
-});
   const allHaveQuote   = legs.every(l => {
     const q = quoteMap[String(l?.exchange_token||"").trim()];
     if (!q) return false;
@@ -369,12 +381,17 @@ legs.forEach(l => {
     </div>
   );
 
-  const SEL = "w-full bg-[#1e2430] border border-[#374151] text-white text-[13px] px-2 py-[7px] focus:outline-none focus:border-blue-500 transition-colors";
-  const RO  = "w-full bg-[#161b27] border border-[#2d3748] text-gray-500 text-[13px] px-2 py-[7px] cursor-not-allowed text-center";
-  const ED  = "w-full bg-[#1e2430] border border-[#374151] text-white text-[13px] px-2 py-[7px] focus:outline-none focus:border-blue-500 text-center";
+  // Every cell has a fixed width and a fixed height (h-8), so changing a
+  // selection or a price never resizes anything.
+  const SEL = "w-full h-8 min-w-0 truncate bg-[#1e2430] border border-[#374151] text-white text-[11px] px-1 focus:outline-none focus:border-blue-500";
+  const RO  = "w-full h-8 min-w-0 bg-[#161b27] border border-[#2d3748] text-gray-500 text-[12px] px-1 cursor-not-allowed text-center";
+  const ED  = "w-full h-8 min-w-0 bg-[#1e2430] border border-[#374151] text-white text-[12px] px-1 focus:outline-none focus:border-blue-500 text-center";
+  const PX  = "h-8 flex items-center justify-end pr-1 font-mono tabular-nums font-semibold text-[11px] whitespace-nowrap overflow-hidden";
 
-  // Grid: Leg | Seg | Sym | Type | Expiry | Strike | Ask | Bid | Side | LotSz | Lots | Token
-  const GRID = "44px 108px 1fr 68px 128px 86px 72px 72px 78px 68px 66px 92px";
+  // Leg | Segment | Symbol | Type | Expiry | Strike | Ask | Bid | Side | Lot Sz | Lots | Token | LTP
+  // Fits ~860px (the left panel on a 1366px laptop) with no horizontal scroll.
+  const GRID = "28px 74px minmax(100px,1fr) 44px 92px 66px 64px 64px 54px 44px 46px 58px 64px";
+  const ROW_H = 44;   // px, incl. padding — 4 rows fit before the list scrolls
 
   return (
     <div className="flex flex-col h-full overflow-hidden bg-[#2d333b]">
@@ -405,30 +422,49 @@ legs.forEach(l => {
           <span>{isConnectingAll?"Working…":isAllConnected?"Disconnect All":"Connect All"}</span>
         </button>
         <div className="w-px h-4 bg-gray-600 mx-0.5"/>
-        <button onClick={onOpenUserManagement}
-          className="flex items-center gap-1 bg-[#2d333b] hover:bg-[#3b4148] border border-gray-600 px-2 py-1 rounded-sm text-[10px] font-medium transition-colors text-purple-300">
-          <Users size={12}/> User Management
+        <button onClick={onRefreshInstruments} disabled={isRefreshingInstruments}
+          title="Download the latest instrument master from Upstox"
+          className="flex items-center gap-1 bg-[#2d333b] hover:bg-[#3b4148] border border-gray-600 px-2 py-1 rounded-sm text-[10px] font-medium transition-colors text-sky-300 disabled:opacity-50 disabled:cursor-not-allowed">
+          <RefreshCw size={12} className={isRefreshingInstruments ? "animate-spin" : ""}/>
+          {isRefreshingInstruments ? "Refreshing…" : "Refresh Instruments"}
         </button>
       </div>
+
+      {/* Trading mode — always visible */}
+      <div className={`px-4 py-1 shrink-0 flex items-center gap-2 border-b text-[11px] font-semibold ${
+        execConfig.tradingMode === "LIVE" ? "bg-red-500/10 border-red-500/40 text-red-300" : "bg-amber-500/10 border-amber-500/40 text-amber-300"}`}>
+        <span className={`px-1.5 rounded-sm text-[10px] ${execConfig.tradingMode === "LIVE" ? "bg-red-600 text-white" : "bg-amber-500 text-black"}`}>
+          {execConfig.tradingMode === "LIVE" ? "LIVE" : "PAPER"}
+        </span>
+        {execConfig.tradingMode === "LIVE"
+          ? "Orders go to the broker — real money."
+          : "Paper mode — orders are simulated on the live market feed; nothing is sent to the broker."}
+      </div>
+
+      {halted && (
+        <div className="px-4 py-1.5 shrink-0 flex items-center gap-2 bg-red-500/15 border-b border-red-500/40 text-red-300 text-[11px] font-semibold">
+          <OctagonX size={13}/> Trading halted by admin{execConfig.haltReason ? ` — ${execConfig.haltReason.replace(/[.\s]+$/, "")}` : ""}. Execute is disabled.
+        </div>
+      )}
 
       {/* Number of legs */}
       <div className="px-4 py-2 shrink-0 flex items-center gap-6 border-b border-gray-700 bg-[#252b33]">
         <span className="text-white font-medium text-[14px]">Number of Legs:</span>
-        {[1,2,3,4,5,6,7,8].map(n=>(
+        {Array.from({ length: maxLegs }, (_, i) => i + 1).map(n=>(
           <label key={n} className="flex items-center gap-2 cursor-pointer select-none">
             <input type="radio" name="numLegs" value={n} checked={numLegs===n}
-              onChange={()=>setNumLegs(n)} className="w-[17px] h-[17px] accent-blue-500 cursor-pointer"/>
+              onChange={()=>{ log(`Legs: ${numLegs} → ${n}`); setNumLegs(n); }} className="w-[17px] h-[17px] accent-blue-500 cursor-pointer"/>
             <span className="text-white text-[14px]">{n}</span>
           </label>
         ))}
       </div>
 
       {/* Legs table */}
-      <div className="flex-1 overflow-auto">
-        <div className="px-4 py-3 min-w-[1080px]">
+      <div className="flex-1 min-h-0 overflow-auto">
+        <div className="px-2 pt-2 pb-1 min-w-[860px]">
 
           {/* Header */}
-          <div className="grid gap-2 mb-3 px-2 text-white font-semibold text-[13px]"
+          <div className="grid gap-1 mb-1.5 px-1.5 text-gray-200 font-semibold text-[11px]"
                style={{gridTemplateColumns:GRID}}>
             <div>Leg</div>
             <div>Segment</div>
@@ -442,32 +478,34 @@ legs.forEach(l => {
             <div>Lot Sz</div>
             <div>Lots</div>
             <div>Token</div>
+            <div className="text-amber-300 text-right pr-1">LTP</div>
           </div>
 
-          {/* Rows */}
-          <div className="flex flex-col gap-2">
+          {/* Rows: up to 4 visible, a scrollbar only from the 5th leg */}
+          <div className="flex flex-col gap-1.5 overflow-y-auto custom-scrollbar"
+               style={{ maxHeight: ROW_H * 4 + 6 * 3 }}>
             {legs.map((leg,idx)=>{
               if (!leg) return null;
               const segD = marketData[leg.segment]       || {symbols:[]};
               const symD = segD.data?.[leg.symbol]       || {types:[]};
               const typD = symD.data?.[leg.type]         || {expiries:[]};
               const expD = typD.data?.[leg.expiry]       || {strikes:[]};
-              const q    = quoteMap[String(leg.exchange_token||"").trim()] || {bid:0,ask:0};
+              const q    = quoteMap[String(leg.exchange_token||"").trim()] || {bid:0,ask:0,ltp:0};
               const tokOk = leg.exchange_token && leg.exchange_token !== "Unknown Key" && leg.exchange_token !== "";
               const askOk = (q.ask||0) > 0;
               const bidOk = (q.bid||0) > 0;
               const isBuy = (leg.side||"Buy") === "Buy";
 
               return (
-                <div key={idx} className="grid gap-2 items-center px-2 py-[10px] border border-gray-600 rounded"
-                     style={{gridTemplateColumns:GRID, background:"#2d333b"}}>
+                <div key={idx} className="grid gap-1 items-center px-1.5 border border-gray-600 rounded shrink-0"
+                     style={{gridTemplateColumns:GRID, background:"#2d333b", height: ROW_H}}>
 
-                  <div className="font-bold text-white text-center text-[14px]">L{idx+1}</div>
+                  <div className="font-bold text-white text-center text-[13px]">L{idx+1}</div>
 
                   <select className={SEL} value={leg.segment} onChange={e=>handleLegChange(idx,"segment",e.target.value)}>
                     {Object.keys(marketData).map(s=><option key={s} value={s}>{s}</option>)}
                   </select>
-                  <select className={SEL} value={leg.symbol} onChange={e=>handleLegChange(idx,"symbol",e.target.value)}>
+                  <select className={SEL} value={leg.symbol} title={leg.symbol} onChange={e=>handleLegChange(idx,"symbol",e.target.value)}>
                     {segD.symbols.map(s=><option key={s} value={s}>{s}</option>)}
                   </select>
                   <select className={SEL} value={leg.type} onChange={e=>handleLegChange(idx,"type",e.target.value)}>
@@ -477,44 +515,22 @@ legs.forEach(l => {
                     {typD.expiries.map(e=><option key={e} value={e}>{e}</option>)}
                   </select>
                   <select className={SEL} value={leg.strike} onChange={e=>handleLegChange(idx,"strike",e.target.value)}
-                    disabled={leg.type==="FO"} style={leg.type==="FO"?{opacity:.4}:{}}>
-                    {leg.type==="FO"?<option value="N/A">N/A</option>
+                    disabled={noStrike(leg.type)} style={noStrike(leg.type)?{opacity:.4}:{}}>
+                    {noStrike(leg.type)?<option value="N/A">N/A</option>
                       :expD.strikes.map(s=><option key={s} value={s}>{s}</option>)}
                   </select>
 
                   {/* Ask — price sellers are offering (used for BUY orders) */}
-                  <div
-  className={`font-mono font-semibold text-center text-[11px] ${
-    askOk
-      ? "text-orange-400"
-      : q.hasData
-      ? "text-yellow-400"
-      : "text-gray-600"
-  }`}
->
-  {!q.hasData
-    ? "Closed"
-    : askOk
-    ? q.ask.toFixed(2)
-    : "No Liquidity"}
-</div>
+                  <div className={`${PX} ${askOk ? "text-orange-400" : "text-gray-600"}`}
+                       title={!q.hasData ? "No quote yet" : askOk ? "" : "No sellers right now"}>
+                    {askOk ? q.ask.toFixed(2) : "—"}
+                  </div>
 
                   {/* Bid — price buyers are bidding (used for SELL orders) */}
-                  <div
-  className={`font-mono font-semibold text-center text-[11px] ${
-    bidOk
-      ? "text-teal-400"
-      : q.hasData
-      ? "text-yellow-400"
-      : "text-gray-600"
-  }`}
->
-  {!q.hasData
-    ? "Closed"
-    : bidOk
-    ? q.bid.toFixed(2)
-    : "No Liquidity"}
-</div>
+                  <div className={`${PX} ${bidOk ? "text-teal-400" : "text-gray-600"}`}
+                       title={!q.hasData ? "No quote yet" : bidOk ? "" : "No buyers right now"}>
+                    {bidOk ? q.bid.toFixed(2) : "—"}
+                  </div>
 
                   {/* Side */}
                   <select className={`${SEL} font-semibold`} value={leg.side||"Buy"}
@@ -531,11 +547,16 @@ legs.forEach(l => {
                     onChange={e=>handleLegChange(idx,"lots",e.target.value)} className={ED}/>
 
                   {/* Token */}
-                  <div className="flex items-center gap-1.5 overflow-hidden" title={leg.exchange_token}>
-                    <span className={`text-lg leading-none shrink-0 ${tokOk?"text-emerald-500":"text-red-500"}`}>●</span>
+                  <div className="h-8 flex items-center gap-1 overflow-hidden" title={leg.exchange_token}>
+                    <span className={`text-[10px] leading-none shrink-0 ${tokOk?"text-emerald-500":"text-red-500"}`}>●</span>
                     <span className={`font-mono text-[11px] truncate ${tokOk?"text-emerald-400":"text-red-400"}`}>
                       {tokOk?leg.exchange_token:"N/A"}
                     </span>
+                  </div>
+
+                  {/* LTP */}
+                  <div className={`${PX} ${(q.ltp||0) > 0 ? "text-amber-300" : "text-gray-600"}`}>
+                    {(q.ltp||0) > 0 ? Number(q.ltp).toFixed(2) : "—"}
                   </div>
                 </div>
               );
@@ -547,19 +568,25 @@ legs.forEach(l => {
       {/* Execute bar */}
       <div className="px-4 py-2.5 bg-[#1e2329] border-t border-gray-700 flex items-center justify-between shrink-0">
         <div className="text-[10px] text-gray-400 leading-5">
-          <div><span className="text-orange-400">Ask</span> = BUY limit price &nbsp;|&nbsp; <span className="text-teal-400">Bid</span> = SELL limit price &nbsp;|&nbsp; 0.1% buffer, DAY LIMIT order</div>
-          {allTokensValid && !allHaveQuote && (
-            legs.some(l => quoteMap[String(l?.exchange_token||"").trim()]?.hasData)
-              ? <div className="text-amber-500 mt-0.5">Selected contract has no liquidity (Bid/Ask unavailable)</div>
-              : <div className="text-amber-500 mt-0.5">Waiting for bid/ask from market socket…</div>
-          )}
+          <div>
+            <span className="text-orange-400">Ask</span> = BUY limit price &nbsp;|&nbsp; <span className="text-teal-400">Bid</span> = SELL limit price &nbsp;|&nbsp;
+            {" "}{execConfig.engine.bufferPct}% buffer, DAY LIMIT order, {execConfig.engine.fillTimeout}s fill timeout, {execConfig.engine.maxRetries} {execConfig.engine.maxRetries === 1 ? "retry" : "retries"}
+          </div>
+          <div className="text-amber-500 mt-0.5 h-5 overflow-hidden">
+            {allTokensValid && !allHaveQuote && (
+              legs.some(l => quoteMap[String(l?.exchange_token||"").trim()]?.hasData)
+                ? "Selected contract has no liquidity right now (no bid / ask)"
+                : "Waiting for bid/ask from the market feed…"
+            )}
+          </div>
         </div>
-        <button onClick={()=>onExecute(legs)} disabled={!allTokensValid||!allHaveQuote||isExecuting}
+        <button onClick={()=>onExecute(legs)} disabled={halted||!allTokensValid||!allHaveQuote||isExecuting}
+          title={halted ? "Trading is halted by admin" : undefined}
           className={`flex items-center gap-2 px-8 py-2 font-bold rounded-sm text-sm transition-all
-            ${allTokensValid&&allHaveQuote&&!isExecuting
+            ${!halted&&allTokensValid&&allHaveQuote&&!isExecuting
               ?"bg-emerald-600 hover:bg-emerald-500 text-white shadow-[0_0_12px_rgba(16,185,129,0.4)]"
               :"bg-gray-700 text-gray-500 cursor-not-allowed"}`}>
-          {isExecuting?<><Loader size={14} className="animate-spin"/>EXECUTING…</>:"EXECUTE PORTFOLIO"}
+          {isExecuting?<><Loader size={14} className="animate-spin"/>EXECUTING…</>:execConfig.tradingMode === "LIVE" ? "EXECUTE LIVE" : "EXECUTE (PAPER)"}
         </button>
       </div>
     </div>
@@ -574,25 +601,38 @@ const ClientCard = ({ client, quoteMap, onToggleLogin, onToggleConnect }) => {
   const [rows,     setRows]     = useState([]);
   const [fetching, setFetching] = useState(false);
 
-  const fetchData = useCallback(async () => {
-    if (!client.isLogged) { setRows([]); return; }
-    setFetching(true);
+  const inFlight = useRef(false);
+
+  // background=true: periodic refresh — no spinner, and a failed request
+  // (e.g. backend briefly unreachable) keeps the last rows on screen.
+  const fetchData = useCallback(async (background = false) => {
+    const isAlgo = viewMode === "algo" || viewMode === "algoorders"; // strategy books need no broker login (PAPER)
+    if (!isAlgo && !client.isLogged) { setRows([]); return; }
+    if (inFlight.current) return;
+    inFlight.current = true;
+    if (!background) setFetching(true);
     try {
-      const r = await fetch(`${API}/api/clients/${client.id}/${viewMode}`, {
-  headers: authHeaders(),
-});
+      const path = viewMode === "algo" ? "strategy-positions" : viewMode === "algoorders" ? "strategy-orders" : viewMode;
+      const r = await fetch(`${API}/api/clients/${client.id}/${path}`, { headers: authHeaders() });
       const d = await r.json();
-
-      console.log("POSITIONS API RESPONSE:", d);
-
-      setRows(Array.isArray(d) ? d : []);
-    } catch { setRows([]); }
-    finally { setFetching(false); }
+      if (r.ok) setRows(Array.isArray(d) ? d : []);
+    } catch {
+      if (!background) setRows([]);
+    } finally {
+      inFlight.current = false;
+      if (!background) setFetching(false);
+    }
   }, [client.id, client.isLogged, viewMode]);
 
-  useEffect(()=>{ fetchData(); },[fetchData]);
+  useEffect(() => {
+    fetchData(false);
+    const id = setInterval(() => { if (!document.hidden) fetchData(true); }, viewMode.startsWith("algo") ? 3000 : 5000);
+    return () => clearInterval(id);
+  }, [fetchData, viewMode]);
 
   const HDRS = {
+    algo:      ["Strategy","Mode","Order ID","Instrument","Side","Qty","Entry","LTP","Stop","Status","P&L","Slot"],
+    algoorders:["Time","Strategy","Mode","Order ID","Instrument","Side","Qty","Price","Reason","P&L","Status"],
     orders:    ["Token","Side","Qty","Filled","Pending","Price","Product","Type","TIF","Status","AppID","ExchID","Time","Date"],
     trades:    ["Token","Side","Qty","Price","Product","Type","AppID","ExchID","Status","Time","Date"],
     positions: ["Token","Product","LTP","MTM","Realized","Unrealized","BuyQty","BuyAvg","SellQty","SellAvg","NetQty","NetAvg"],
@@ -600,7 +640,60 @@ const ClientCard = ({ client, quoteMap, onToggleLogin, onToggleConnect }) => {
 
   const renderRows = () => {
     if (fetching) return <tr><td colSpan={20} className="px-2 py-4 text-center text-emerald-400 text-[9px]"><Loader className="animate-spin inline mr-1" size={10}/>Loading…</td></tr>;
-    if (!rows.length) return <tr><td colSpan={20} className="px-2 py-4 text-center text-gray-500 text-[9px]">{client.isLogged?"No data":"Login required"}</td></tr>;
+    if (!rows.length) return <tr><td colSpan={20} className="px-2 py-4 text-center text-gray-500 text-[9px]">
+      {viewMode==="algo" ? "No PAPER strategy positions for this client today"
+        : viewMode==="algoorders" ? "No PAPER strategy orders for this client today"
+        : client.isLogged ? "No data" : "Login required"}
+    </td></tr>;
+
+    if (viewMode==="algoorders") return rows.map(t => (
+      <tr key={t.id} className="text-gray-300 text-[9px] hover:bg-[#2d333b] border-b border-gray-800">
+        <td className="px-2 py-1">{t.time}</td>
+        <td className="px-2 py-1 text-white">{t.strategy}</td>
+        <td className={`px-2 py-1 font-semibold ${t.mode==="LIVE"?"text-red-300":"text-amber-300"}`}>{t.mode}</td>
+        <td className="px-2 py-1 font-mono text-[8px] text-gray-200">{t.orderId || "—"}</td>
+        <td className="px-2 py-1">
+          <div className="text-white">{t.tradingSymbol}</div>
+          <div className="text-[8px] text-gray-500 font-mono">{t.token}</div>
+        </td>
+        <td className={`px-2 py-1 font-semibold ${t.side==="BUY"?"text-blue-400":"text-red-400"}`}>{t.side}</td>
+        <td className="px-2 py-1">{t.qty}</td>
+        <td className="px-2 py-1 text-white">{t.price}</td>
+        <td className="px-2 py-1">{t.reason}</td>
+        <td className={`px-2 py-1 font-semibold ${t.pnl==null||t.pnl===""?"text-gray-500":Number(t.pnl)>=0?"text-emerald-400":"text-red-400"}`}>
+          {t.pnl==null||t.pnl==="" ? "—" : Number(t.pnl).toFixed(2)}
+        </td>
+        <td className="px-2 py-1">{t.status}</td>
+      </tr>
+    ));
+
+    if (viewMode==="algo") return rows.map(p => {
+      const pnl = p.status==="OPEN" ? p.unrealized : p.pnl;
+      return (
+        <tr key={`${p.assignmentId}-${p.id}`} className="text-gray-300 text-[9px] hover:bg-[#2d333b] border-b border-gray-800">
+          <td className="px-2 py-1 text-white">{p.strategyName}</td>
+          <td className={`px-2 py-1 font-semibold ${p.mode==="LIVE"?"text-red-300":"text-amber-300"}`}>{p.mode}</td>
+          <td className="px-2 py-1 font-mono text-[8px] text-gray-300">
+            <div>{p.orderId || "—"}</div>
+            {p.exitOrderId && <div className="text-gray-500">exit {p.exitOrderId}</div>}
+          </td>
+          <td className="px-2 py-1">
+            <div className="text-white">{p.tradingSymbol}</div>
+            <div className="text-[8px] text-gray-500 font-mono">{p.token}{p.delta!=null?` · Δ${p.delta}`:""}</div>
+          </td>
+          <td className={`px-2 py-1 font-semibold ${p.side==="BUY"?"text-blue-400":"text-red-400"}`}>{p.side}</td>
+          <td className="px-2 py-1">{p.qty}</td>
+          <td className="px-2 py-1">{p.entryPrice}</td>
+          <td className="px-2 py-1 text-amber-400 font-semibold">{p.ltp ?? "—"}</td>
+          <td className="px-2 py-1">{p.stopPrice ?? "—"}</td>
+          <td className={`px-2 py-1 font-semibold ${p.status==="OPEN"?"text-emerald-400":p.status==="CHECK"?"text-fuchsia-400":"text-gray-400"}`}>
+            {p.status}{p.exitReason?` (${p.exitReason})`:""}
+          </td>
+          <td className={`px-2 py-1 font-semibold ${pnl==null?"text-gray-500":pnl>=0?"text-emerald-400":"text-red-400"}`}>{pnl==null?"—":Number(pnl).toFixed(2)}</td>
+          <td className="px-2 py-1 text-gray-500">{p.slot}</td>
+        </tr>
+      );
+    });
 
     if (viewMode==="orders") return rows.map((o,i)=>(
       <tr key={i} className="text-gray-300 text-[9px] hover:bg-[#2d333b] border-b border-gray-800">
@@ -743,13 +836,11 @@ const mtm =
       </td>
 
       <td className="px-2 py-1">
-        <td className="px-2 py-1">
-  {qty > 0
-    ? buyAvg.toFixed(2)
-    : qty < 0
-    ? sellAvg.toFixed(2)
-    : "—"}
-</td>
+        {qty > 0
+          ? buyAvg.toFixed(2)
+          : qty < 0
+          ? sellAvg.toFixed(2)
+          : "—"}
       </td>
     </tr>
   );
@@ -767,15 +858,22 @@ const mtm =
         </div>
         <div className="flex gap-1.5 items-center shrink-0">
           <div className="flex bg-[#161a1f] p-[2px] rounded-sm border border-gray-700">
-            {["orders","trades","positions"].map(m=>(
+            {["orders","trades","positions","algo","algoorders"].map(m=>(
               <button key={m} onClick={()=>setViewMode(m)}
                 className={`px-1.5 py-0.5 text-[8px] font-medium rounded-sm transition-colors
                   ${viewMode===m?"bg-[#3b4148] text-white shadow-sm":"text-gray-400 hover:text-gray-200"}`}>
-                {m==="orders"?"Orders":m==="trades"?"Trades":"Positions"}
+                {m==="orders"?"Orders":m==="trades"?"Trades":m==="positions"?"Positions":m==="algo"?"Algo Pos":"Algo Orders"}
               </button>
             ))}
           </div>
-          <button onClick={fetchData} className="p-1 text-gray-500 hover:text-gray-200 transition-colors" title="Refresh"><Activity size={12}/></button>
+          <button onClick={() => fetchData(false)} className="p-1 text-gray-500 hover:text-gray-200 transition-colors" title="Refresh"><Activity size={12}/></button>
+          <button
+            onClick={() => saveText(rowsToCsv(rows, CSV_COLUMNS[viewMode]), `${client.id}-${CSV_NAMES[viewMode]}-${todayIst()}.csv`)}
+            disabled={!rows.length}
+            title={rows.length ? `Download this ${CSV_NAMES[viewMode].replace("-", " ")} as CSV` : "Nothing to download"}
+            className="flex items-center gap-0.5 px-1 py-0.5 text-[8px] font-semibold text-emerald-400 hover:text-emerald-300 border border-gray-700 rounded-sm disabled:opacity-30 disabled:cursor-not-allowed">
+            <Download size={10}/> CSV
+          </button>
           <div className="w-px h-4 bg-gray-600"/>
           {client.isLogged
             ?<button onClick={()=>onToggleLogin(client.id,false)} className="p-1 bg-red-600/20 hover:bg-red-600/40 text-red-400 border border-red-600/30 rounded-sm"><LogOut size={12}/></button>
@@ -792,6 +890,8 @@ const mtm =
           {viewMode==="orders"   &&<><LayoutList size={9} className="text-blue-400"/>Order Book</>}
           {viewMode==="trades"   &&<><BookOpen   size={9} className="text-emerald-400"/>Trade Book</>}
           {viewMode==="positions"&&<><Briefcase  size={9} className="text-amber-400"/>Positions</>}
+          {viewMode==="algo"     &&<><Bot        size={9} className="text-sky-400"/>PAPER strategy positions — LIVE strategy trades are in Orders / Trades / Positions</>}
+          {viewMode==="algoorders"&&<><Bot       size={9} className="text-sky-400"/>PAPER strategy orders today, by PAPER order ID — LIVE ones are in Orders / Trades</>}
         </div>
         <table className="w-full text-left border-collapse whitespace-nowrap">
           <thead>
@@ -814,132 +914,142 @@ export default function App() {
   const [instrLoading,    setInstrLoading]    = useState(true);
   const [clients,         setClients]         = useState([]);
   const [quoteMap,        setQuoteMap]        = useState({});   // { token: { bid, ask } }
-  const [globalLogs,      setGlobalLogs]      = useState([`[${new Date().toLocaleTimeString()}] System initialized`]);
+  const [globalLogs,      setGlobalLogs]      = useState(() => [`[${new Date().toLocaleTimeString("en-GB", { hour12: false })}] System initialized`]);
   const [wsStatus,        setWsStatus]        = useState("disconnected");
   const [isLoggingAll,    setIsLoggingAll]    = useState(false);
   const [isConnectingAll, setIsConnectingAll] = useState(false);
   const [isExecuting,     setIsExecuting]     = useState(false);
-  const [showUserMgmt,    setShowUserMgmt]    = useState(false);
-  const [executionHistory, setExecutionHistory] = useState(() => {
-  try {
-    const today = new Date().toLocaleDateString();
-
-    const saved = JSON.parse(
-      localStorage.getItem("executionHistory") || "[]"
-    );
-
-    // Keep only today's records
-    const todayData = saved.filter(x => x.date === today);
-
-    // Remove old records from localStorage
-    localStorage.setItem(
-      "executionHistory",
-      JSON.stringify(todayData)
-    );
-
-    return todayData;
-  } catch {
-    return [];
-  }
-});
-useEffect(() => {
-
-    try {
-
-        localStorage.setItem(
-            "executionHistory",
-            JSON.stringify(executionHistory)
-        );
-
-    } catch (e) {
-
-        console.error("Failed to save execution history", e);
-
-    }
-
-}, [executionHistory]);
+  const [execConfig,      setExecConfig]      = useState(DEFAULT_EXEC_CONFIG);
+  const [isRefreshingInstruments, setIsRefreshingInstruments] = useState(false);
+  const [leftTab,         setLeftTab]         = useState(() => { try { return localStorage.getItem("xts_left_tab") || "manual"; } catch { return "manual"; } });
+  useEffect(() => { try { localStorage.setItem("xts_left_tab", leftTab); } catch {} }, [leftTab]);
 
   const wsRef     = useRef(null);
+  const [wsEpoch, setWsEpoch] = useState(0);   // bumps on every quote-socket (re)connect
   const logEndRef = useRef(null);
 
   useEffect(()=>{ logEndRef.current?.scrollIntoView({behavior:"smooth"}); },[globalLogs]);
 
-  const ts  = () => new Date().toLocaleTimeString();
+  const ts  = () => new Date().toLocaleTimeString("en-GB", { hour12: false });
+  // Every log line also goes to the server's activity journal. Lines wait in
+  // localStorage while the network is down, so nothing is lost.
+  const outboxRef = useRef(null);
+  if (outboxRef.current === null) {
+    try { outboxRef.current = JSON.parse(localStorage.getItem("xts_activity_outbox") || "[]"); }
+    catch { outboxRef.current = []; }
+  }
+  const saveOutbox = () => {
+    try { localStorage.setItem("xts_activity_outbox", JSON.stringify(outboxRef.current.slice(-2000))); } catch { /* storage full */ }
+  };
   const log = useCallback(msg => {
     setGlobalLogs(p => [...p.slice(-500), `[${ts()}] ${msg}`]);
+    outboxRef.current.push({ ts: Date.now(), message: String(msg) });
+    saveOutbox();
   },[]);
+
+  useEffect(() => {
+    let busy = false;
+    const flush = async () => {
+      if (busy || !outboxRef.current.length || !getToken()) return;
+      busy = true;
+      const batch = outboxRef.current.slice(0, 200);
+      try {
+        const r = await fetch(`${API}/api/activity`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ entries: batch }) });
+        if (r.ok) { outboxRef.current.splice(0, batch.length); saveOutbox(); }
+      } catch { /* offline — retry on the next flush */ }
+      busy = false;
+    };
+    const id = setInterval(flush, 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Today's saved activity (all sources) reloads into the panel after a refresh / restart.
+  useEffect(() => {
+    fetch(`${API}/api/journal/events`, { headers: authHeaders() })
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => {
+        if (!d?.rows?.length) return;
+        const restored = d.rows.slice(-300).map(e => `[${e.time}] ${e.source && e.source !== "UI" ? `[${e.source}] ` : ""}${e.message}`);
+        setGlobalLogs(p => [...restored, `── today's saved activity above · this session below ──`, ...p]);
+      })
+      .catch(() => {});
+  }, []);
+
+  const downloadActivity = async () => {
+    try {
+      await downloadFile(`${API}/api/journal/events?format=csv&date=${todayIst()}`, `activity-log-${todayIst()}.csv`, authHeaders());
+      log("Activity log downloaded.");
+    } catch (e) {
+      log(`❌ Activity log download failed: ${e.message}`);
+    }
+  };
 
   // ── WebSocket for Bid/Ask quotes ──────────────────────────
   useEffect(() => {
     let mounted     = true;
     let reconnTimer = null;
+    let retryMs     = 500;            // fast first retry, backing off to 5 s
+    let errorLogged = false;
+
+    // Ticks are applied once per animation frame: a burst of updates causes
+    // one render, not one per tick.
+    let pending = null;
+    let frame = 0;
+    const flush = () => {
+      frame = 0;
+      const batch = pending;
+      pending = null;
+      if (!batch) return;
+      setQuoteMap(prev => {
+        const next = { ...prev };
+        for (const [token, quote] of Object.entries(batch)) {
+          if (quote?.removed) delete next[token];
+          else next[token] = quote;
+        }
+        return next;
+      });
+    };
+    const queue = data => {
+      pending = Object.assign(pending || {}, data);
+      if (!frame) frame = requestAnimationFrame(flush);
+    };
 
     const connect = () => {
       if (!mounted) return;
-      const ws = new WebSocket(WS);
+      // The quote socket only accepts logged-in dashboards.
+      const token = getToken();
+      if (!token) return;
+      const ws = new WebSocket(`${WS_URL}?token=${encodeURIComponent(token)}`);
       wsRef.current = ws;
       setWsStatus("connecting");
 
       ws.onopen = () => {
         if (!mounted) { ws.close(); return; }
+        retryMs = 500;
+        errorLogged = false;
         setWsStatus("connected");
+        setWsEpoch(e => e + 1);       // legs re-send their subscriptions (backend may have restarted)
         log("Market socket connected — bid/ask live");
       };
 
       ws.onclose = () => {
         if (!mounted) return;
         setWsStatus("disconnected");
-        log("Market socket disconnected — retrying in 4s…");
-        reconnTimer = setTimeout(connect, 4000);
+        if (!errorLogged) log(`Market socket disconnected — reconnecting…`);
+        errorLogged = true;
+        reconnTimer = setTimeout(connect, retryMs);
+        retryMs = Math.min(5000, retryMs * 2);
       };
 
-      ws.onerror = () => { if (mounted) log("Market socket error"); };
+      ws.onerror = () => { /* onclose follows and handles the reconnect */ };
 
       ws.onmessage = (e) => {
-        const data = e.data;
-        if (typeof data === "string") {
-          try {
-            const msg = JSON.parse(data);
-            if (msg.type === "quote" || msg.type === "quotes") {
-              setQuoteMap(prev => {
-    const next = { ...prev };
-
-    Object.entries(msg.data).forEach(([token, quote]) => {
-
-        if (quote?.removed) {
-            delete next[token];
-        } else {
-            next[token] = quote;
-        }
-
-    });
-
-    return next;
-});
-            }
-          } catch (err) {
-            console.error(err);
-          }
-          return;
-        }
-
+        if (typeof e.data !== "string") return; // the backend only sends JSON text
         try {
-          const packet = decodeQuotePacket(
-  data instanceof Blob
-    ? data.arrayBuffer
-      ? data.arrayBuffer()
-      : data
-    : data
-);
-
-console.log("📦 Binary Packet:", packet);
-
-// TEMPORARILY DISABLED
-// if (Object.keys(packet).length) {
-//     setQuoteMap(prev => ({ ...prev, ...packet }));
-// }
+          const msg = JSON.parse(e.data);
+          if (msg.type === "quote" || msg.type === "quotes") queue(msg.data);
         } catch (err) {
-          console.error(err);
+          console.error("Bad quote message:", err);
         }
       };
     };
@@ -949,26 +1059,52 @@ console.log("📦 Binary Packet:", packet);
     return () => {
       mounted = false;
       clearTimeout(reconnTimer);
+      if (frame) cancelAnimationFrame(frame);
       if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close(); }
     };
   }, [log]);
 
-  // ── Load instruments ──────────────────────────────────────
+  // ── Load instruments (backend downloads them from Upstox) ─
+  const loadInstruments = useCallback(async () => {
+    const r = await fetch(`${API}/api/instruments`, { headers: authHeaders() });
+    const raw = await r.json();
+    if (!Array.isArray(raw)) throw new Error(raw?.error || "Unexpected instrument response");
+    setMarketData(buildMarketData(raw));
+    return raw.length;
+  }, []);
+
   useEffect(() => {
-    fetch(`${API}/api/instruments`, {
-        headers: authHeaders(),
-    })
-    .then(r => r.json())
-    .then(raw => {
-        setMarketData(buildMarketData(raw));
-        log(`Instruments: ${raw.length.toLocaleString()} loaded`);
-    })
-    .catch(e => {
-        log(`ERROR loading instruments: ${e.message}`);
-        setMarketData({});
-    })
-    .finally(() => setInstrLoading(false));
-}, [log]);
+    loadInstruments()
+      .then(n => log(`Instruments: ${n.toLocaleString()} instruments loaded (allowed segments)`))
+      .catch(e => { log(`ERROR loading instruments: ${e.message}`); setMarketData({}); })
+      .finally(() => setInstrLoading(false));
+  }, [log, loadInstruments]);
+
+  const refreshInstruments = async () => {
+    setIsRefreshingInstruments(true);
+    log("Instruments: downloading latest master from Upstox…");
+    try {
+      const r = await fetch(`${API}/api/instruments/refresh`, { method: "POST", headers: authHeaders() });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      const n = await loadInstruments();
+      if (d.lastError) log(`⚠️ Instruments: download failed (${d.lastError}) — still using the copy from ${new Date(d.fetchedAt).toLocaleString()}`);
+      else log(`✅ Instruments refreshed: ${d.count.toLocaleString()} total, ${n.toLocaleString()} in allowed segments`);
+    } catch (e) {
+      log(`❌ Instrument refresh failed: ${e.message}`);
+    } finally {
+      setIsRefreshingInstruments(false);
+    }
+  };
+
+  // ── Execution settings set by the admin (kill switch, engine, limits) ──
+  const fetchExecConfig = useCallback(async () => {
+    try {
+      const r = await fetch(`${API}/api/execution/config`, { headers: authHeaders() });
+      if (r.ok) setExecConfig(await r.json());
+    } catch { /* keep the last known values */ }
+  }, []);
+  useEffect(() => { fetchExecConfig(); const id = setInterval(fetchExecConfig, 5000); return () => clearInterval(id); }, [fetchExecConfig]);
 
   // ── Poll client state ─────────────────────────────────────
   const fetchClients = useCallback(async () => {
@@ -992,6 +1128,16 @@ console.log("📦 Binary Packet:", packet);
   useEffect(() => { fetchClients(); const id = setInterval(fetchClients, 4000); return ()=>clearInterval(id); }, [fetchClients]);
 
   // ── API helper ────────────────────────────────────────────
+  // Trade book CSV from the server journal (manual + strategy fills; survives restarts).
+  const downloadTradeBook = async () => {
+    try {
+      await downloadFile(`${API}/api/journal/trades?format=csv&date=${todayIst()}`, `trade-book-${todayIst()}.csv`, authHeaders());
+      log("Trade book downloaded.");
+    } catch (e) {
+      log(`❌ Trade book download failed: ${e.message}`);
+    }
+  };
+
   const callApi = async (url, body) => {
   const r = await fetch(`${API}${url}`, {
     method: "POST",
@@ -1052,8 +1198,10 @@ console.log("📦 Binary Packet:", packet);
   // ── Execute portfolio ─────────────────────────────────────
   // Injects current bid/ask from quoteMap into each leg before sending
   const executePortfolio = async (rawLegs) => {
-    const active = clients.filter(c=>c.enabled&&c.isLogged&&c.isConnected);
-    if (!active.length) { log("ERROR: No active (enabled+logged+connected) clients"); return; }
+    // PAPER needs no broker session; LIVE needs each client logged in and connected.
+    const paperMode = execConfig.tradingMode !== "LIVE";
+    const active = clients.filter(c => c.enabled && (paperMode || (c.isLogged && c.isConnected)));
+    if (!active.length) { log(paperMode ? "ERROR: No enabled clients" : "ERROR: No active (enabled+logged+connected) clients"); return; }
 
     // Inject current live bid/ask/ltp into each leg for initial price reference
     const legs = rawLegs.map(l => {
@@ -1061,119 +1209,43 @@ console.log("📦 Binary Packet:", packet);
       return { ...l, bid: q.bid, ask: q.ask, ltp: q.ltp };
     });
 
+    if (execConfig.tradingHalted) { log(`ERROR: Trading is halted by admin${execConfig.haltReason ? ` — ${execConfig.haltReason}` : ""}`); return; }
+
+    const eng = execConfig.engine;
     setIsExecuting(true);
-    log(`MLO EXECUTE: ${legs.length} leg(s) × ${active.length} client(s) | buf=0.5% timeout=6s retries=1`);
+    log(`MLO EXECUTE: ${legs.length} leg(s) × ${active.length} client(s) | buf=${eng.bufferPct}% timeout=${eng.fillTimeout}s retries=${eng.maxRetries}`);
 
     try {
       const results = await callApi("/api/order", { legs });
-      const arr = Array.isArray(results) ? results : [results];
+      if (!Array.isArray(results)) {
+        // Refused before any order was sent (halted, risk limit, already running…)
+        log(`❌ Execution refused: ${results?.error || "unknown error"}`);
+        fetchExecConfig();
+        setIsExecuting(false);
+        return;
+      }
+      const arr = results;
+      const labelOf = r => r.label || [r.symbol, r.type, r.strike && r.strike !== "N/A" ? r.strike : "FUT"].filter(Boolean).join(" ");
 
-setExecutionHistory(prev => [
-  ...prev,
-  ...arr.map(r => ({
-
-    // ===========================
-    // Date & Time
-    // ===========================
-    date: new Date().toLocaleDateString(),
-    time: new Date().toLocaleTimeString(),
-
-    // ===========================
-    // Client
-    // ===========================
-    client: r.clientName || r.client,
-    clientId: r.client,
-
-    // ===========================
-    // Strategy
-    // ===========================
-    strategy: "MANUAL",
-
-    // ===========================
-    // Instrument
-    // ===========================
-    exchange: r.exchange || "",
-    symbol: r.symbol || r.label || "",
-    expiry: r.expiry || "",
-    strike: r.strike || "",
-    instrument: r.type || "",
-
-    // ===========================
-    // Order
-    // ===========================
-    side: r.side || "",
-
-    lots: r.lots || "",
-    lotSize: r.lotSize || "",
-    multiplier: r.multiplier || 1,
-
-    requestedQty: r.requestedQty || 0,
-    filledQty: r.filledQty || 0,
-    remainingQty: r.remainingQty || 0,
-
-    avgPrice: r.avgPrice || 0,
-
-    bid: r.attempts?.[0]?.bid ?? "",
-    ask: r.attempts?.[0]?.ask ?? "",
-    ltp: r.attempts?.[0]?.ltp ?? "",
-
-    limitPrice: r.attempts?.[0]?.limitPrice ?? "",
-
-    // ===========================
-    // Execution
-    // ===========================
-    buffer: r.buffer ?? 0.50,
-    fillTimeout: r.fillTimeout ?? 6,
-
-    retryCount: Math.max(
-        0,
-        (r.attempts?.length || 1) - 1
-    ),
-
-    attempts: r.attempts?.length || 1,
-
-    executionTime: r.executionTime ?? "",
-
-    // ===========================
-    // Status
-    // ===========================
-    status: r.status || "",
-
-    orderId: r.orderId || "",
-    orderUID: r.orderUniqueIdentifier || "",
-
-    error: r.error || "",
-
-    // ===========================
-    // Future P&L
-    // ===========================
-    buyValue: "",
-    sellValue: "",
-    netQty: "",
-    realizedPnL: "",
-    unrealizedPnL: "",
-    mtm: "",
-    pnl: ""
-
-  }))
-]);
 
       arr.forEach(r => {
         // ── Summary line ──────────────────────────────────────
         if (r.status === "FILLED") {
-          log(`✅ ${r.clientName||r.client} | ${r.label} | FILLED ${r.filledQty}/${r.requestedQty} @ ₹${r.avgPrice?.toFixed(2)||"—"} | ID: ${r.orderId}`);
+          const L = r.latency || {};
+          log(`✅ ${r.clientName||r.client} | ${labelOf(r)} | FILLED ${r.filledQty}/${r.requestedQty} @ ₹${r.avgPrice?.toFixed(2)||"—"} | ID: ${r.orderId}` +
+              (L.totalMs != null ? ` | ⏱ ${L.totalMs} ms (queue ${L.queueMs ?? "—"}, ack ${L.ackMs ?? "—"}, fill ${L.fillMs ?? "—"})` : ""));
         } else if (r.status === "PARTIAL") {
-          log(`⚠️ ${r.clientName||r.client} | ${r.label} | PARTIAL — ${r.filledQty}/${r.requestedQty} filled, ${r.remainingQty} unfilled | ${r.error||""}`);
+          log(`⚠️ ${r.clientName||r.client} | ${labelOf(r)} | PARTIAL — ${r.filledQty}/${r.requestedQty} filled, ${r.remainingQty} unfilled | ${r.error||""}`);
         } else if (r.status === "MANUAL_CHECK") {
 
     log(
-        `🚨 ${r.clientName || r.client} | ${r.label} | MANUAL CHECK REQUIRED — ${r.error}`
+        `🚨 ${r.clientName || r.client} | ${labelOf(r)} | MANUAL CHECK REQUIRED — ${r.error}`
     );
 
 } else if (r.status === "FAILED") {
-          log(`❌ ${r.clientName||r.client} | ${r.label} | FAILED — ${r.error||"unknown error"}`);
+          log(`❌ ${r.clientName||r.client} | ${labelOf(r)} | FAILED — ${r.error||"unknown error"}`);
         } else {
-          log(`❓ ${r.clientName||r.client} | ${r.label} | ${r.status}`);
+          log(`❓ ${r.clientName||r.client} | ${labelOf(r)} | ${r.status}`);
         }
 
         // ── Per-attempt breakdown ──────────────────────────────
@@ -1210,6 +1282,17 @@ setExecutionHistory(prev => [
       {/* TOP 55% */}
       <div className="flex h-[55%] border-b border-gray-700 shrink-0">
         <div className="w-[65%] h-full border-r border-gray-700 flex flex-col">
+          <div className="flex shrink-0 bg-[#161a1f] border-b border-gray-700">
+            {[["manual", "Manual"], ["auto", "Automated Strategies"]].map(([key, label]) => (
+              <button key={key} onClick={() => setLeftTab(key)}
+                className={`px-4 py-1.5 text-[11px] font-semibold border-r border-gray-700 transition-colors ${leftTab === key ? "bg-[#1e2329] text-white" : "text-gray-400 hover:text-gray-200"}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+          {leftTab === "auto" && <StrategyPanel log={log} />}
+          {/* kept mounted while hidden so the chosen legs survive a tab switch */}
+          <div className={leftTab === "manual" ? "flex-1 min-h-0 flex flex-col" : "hidden"}>
           <PortfolioSection
             marketData={marketData} loading={instrLoading} quoteMap={quoteMap}
             onLoginAll={loginAll} onLogoutAll={logoutAll}
@@ -1234,115 +1317,17 @@ setExecutionHistory(prev => [
                 log(`Upload error: ${err.message}`);
               }
             }}
-            onDownload={() => {
-
-    if (!executionHistory.length) {
-        log("No execution history to download.");
-        return;
-    }
-
-    const rows = [[
-    "Date",
-    "Time",
-    "Client",
-    "Client ID",
-    "Strategy",
-    "Exchange",
-    "Symbol",
-    "Expiry",
-    "Strike",
-    "Instrument",
-    "Side",
-    "Lots",
-    "Lot Size",
-    "Multiplier",
-    "Requested Qty",
-    "Filled Qty",
-    "Remaining Qty",
-    "Average Price",
-    "Bid",
-    "Ask",
-    "LTP",
-    "Limit Price",
-    "Buffer %",
-    "Fill Timeout (s)",
-    "Retry Count",
-    "Attempts",
-    "Execution Time (ms)",
-    "Status",
-    "AppOrderID",
-    "Order UID",
-    "Error"
-]];
-
-    executionHistory.forEach(r => {
-
-        rows.push([
-    r.date,
-    r.time,
-    r.client,
-    r.clientId,
-    r.strategy,
-    r.exchange,
-    r.symbol,
-    r.expiry,
-    r.strike,
-    r.instrument,
-    r.side,
-    r.lots,
-    r.lotSize,
-    r.multiplier,
-    r.requestedQty,
-    r.filledQty,
-    r.remainingQty,
-    r.avgPrice,
-    r.bid,
-    r.ask,
-    r.ltp,
-    r.limitPrice,
-    r.buffer,
-    r.fillTimeout,
-    r.retryCount,
-    r.attempts,
-    r.executionTime,
-    r.status,
-    r.orderId,
-    r.orderUID,
-    r.error
-]);
-
-    });
-
-    const csv = rows
-        .map(row => row.map(v => `"${v ?? ""}"`).join(","))
-        .join("\n");
-
-    const blob = new Blob(
-        [csv],
-        { type: "text/csv;charset=utf-8;" }
-    );
-
-    const url = URL.createObjectURL(blob);
-
-    const a = document.createElement("a");
-
-    a.href = url;
-
-    a.download =
-        `Trade_Report_${new Date().toISOString().slice(0,10)}.csv`;
-
-    a.click();
-
-    URL.revokeObjectURL(url);
-
-    log("Trade report downloaded.");
-
-}}
+            onDownload={downloadTradeBook}
             isAllLogged={isAllLogged} isAllConnected={isAllConnected}
             isLoggingAll={isLoggingAll} isConnectingAll={isConnectingAll}
             onExecute={executePortfolio} isExecuting={isExecuting}
-            onOpenUserManagement={()=>setShowUserMgmt(true)}
+            onRefreshInstruments={refreshInstruments}
+            isRefreshingInstruments={isRefreshingInstruments}
+            execConfig={execConfig}
+            wsEpoch={wsEpoch}
+            log={log}
           />
+          </div>
         </div>
 
         <div className="w-[35%] h-full flex flex-col bg-[#1a1e24]">
@@ -1392,6 +1377,11 @@ setExecutionHistory(prev => [
               <div className="flex items-center gap-1.5 px-2 py-1.5 bg-[#242a31] border-b border-gray-700 shrink-0">
                 <Terminal size={12} className="text-blue-400"/>
                 <span className="text-[10px] font-bold text-gray-100">Global Market Log</span>
+                <span className="text-[8px] text-gray-500">saved on the server</span>
+                <button onClick={downloadActivity} title="Download today's full activity log (CSV)"
+                  className="ml-auto flex items-center gap-0.5 px-1.5 py-0.5 text-[8px] font-semibold text-emerald-400 hover:text-emerald-300 border border-gray-700 rounded-sm">
+                  <Download size={10}/> CSV
+                </button>
               </div>
               <div className="flex-1 overflow-y-auto p-1.5 bg-[#0d1117] font-mono text-[9px] leading-relaxed custom-scrollbar">
                 {globalLogs.map((line,i)=>{
@@ -1411,7 +1401,7 @@ setExecutionHistory(prev => [
       {/* BOTTOM 45% — Client Cards */}
       <div className="flex-1 bg-[#0a0d11] p-2 overflow-y-auto custom-scrollbar">
         {clients.length===0
-          ?<div className="h-full flex items-center justify-center text-gray-500 text-sm">No clients — add CLI1_ID etc. to .env</div>
+          ?<div className="h-full flex items-center justify-center text-gray-500 text-sm">No clients assigned to you — an admin can add them in the Admin console (Ctrl+Shift+Space)</div>
           :<div className="grid grid-cols-1 md:grid-cols-3 gap-2 auto-rows-[220px]">
              {clients.map(c => (
   <ClientCard
@@ -1433,12 +1423,6 @@ setExecutionHistory(prev => [
         select option{background:#24292e}
       `}}/>
 
-      {showUserMgmt && (
-        <UserManagement
-          onClose={() => setShowUserMgmt(false)}
-          onClientsChanged={fetchClients}
-        />
-      )}
     </div>
   );
 }

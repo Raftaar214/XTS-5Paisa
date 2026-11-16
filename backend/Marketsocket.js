@@ -1,33 +1,62 @@
+// Marketsocket.js — live bid / ask / LTP from the XTS market-data feed.
+//
+// Prices are TICK data pushed by the broker over Socket.IO (1501 touchline /
+// 1502 market depth, JSON "Full" mode) — there is no polling. A snapshot is
+// taken once, from the subscription response, when a token is first
+// subscribed, so a price shows at once.
+//
+// Session handling: the broker allows ONE market-data session per API key.
+// If the session ends ("io server disconnect", logout, "Invalid Token") the
+// module logs in again, reconnects and re-subscribes every token by itself.
+// If that keeps happening, another login is using the same Market Data key
+// (another running copy of this backend, or another app) — it says so and
+// backs off instead of fighting it.
+//
+// Credentials come from the PARENT client (Admin → Clients), falling back to
+// MARKET_APP_KEY / MARKET_SECRET_KEY in .env when no parent exists yet.
+
 const axios = require("axios");
 const io    = require("socket.io-client");
 const { getSegmentForToken } = require("./instrumentloader");
 const { getParent }          = require("./clients");
-const { ipv4Agent } = require("./httpAgent");
+const { ipv4Agent }          = require("./httpAgent");
 axios.defaults.httpsAgent = ipv4Agent;
 
 const BASE_DEFAULT = process.env.XTS_MARKET_URL || process.env.XTS_INTERACTIVE_URL || "https://xtsmum.5paisa.com";
+const SUB_PATHS = ["/apimarketdata/instruments/subscription", "/marketdata/instruments/subscription"];
+const CHUNK = 50;                      // instruments per subscription request
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const TAKEOVER_BACKOFF_MS = Number(process.env.MARKET_TAKEOVER_BACKOFF_MS || 30_000);
+const RELOGIN_BASE_MS     = Number(process.env.MARKET_RELOGIN_BASE_MS || 2000);
 
 // ─────────────────────────────────────────────────────────────
 // State
 // ─────────────────────────────────────────────────────────────
-let marketToken   = null;
-let marketUserID  = null;
-let socket        = null;
-let quoteCallback = null;
-let refreshTimer  = null;   // periodic snapshot refresh
-let MARKET_BASE   = BASE_DEFAULT; // set from the Parent client's Root URL once logged in
+let marketToken  = null;
+let marketUserID = null;
+let socket       = null;
+let joined       = false;
+let MARKET_BASE  = BASE_DEFAULT;
+let subPath      = null;               // which subscription URL works (found on first call)
 
-const liveQuotes    = {};
-const subscribedMap = new Map();   // token → { xtsSegmentCode }
-const rawEventCounts = {};
+const liveQuotes    = {};              // token → { bid, ask, ltp, hasData, ts }
+const subscribedMap = new Map();       // token → { xtsSegmentCode }
+const owners        = new Map();       // token → Set(owner)  ("ui:<user>", "positions", "strategy:<id>")
+
+const quoteListeners = new Set();
+function notify(update) { quoteListeners.forEach(fn => { try { fn(update); } catch (_) {} }); }
+
+const stats = {
+  ticks: 0, ticksLastMinute: 0, lastTickAt: 0,
+  recoveries: [],                      // timestamps of re-logins (last 5 min)
+  lastError: "", takeoverWarnedAt: 0,
+};
+let heartbeatTimer = null;
+
+const isInvalidToken = d => d?.code === "e-session-0007" || /invalid token/i.test(String(d?.description || ""));
 
 // ─────────────────────────────────────────────────────────────
 // LOGIN
-// Credentials come from the PARENT client, configured via User
-// Management (market data key/secret are mandatory on the parent).
-// Falls back to MARKET_APP_KEY / MARKET_SECRET_KEY / CLI1_* in .env
-// only when no parent has been configured yet, so a brand-new
-// install still boots exactly the way it always did.
 // ─────────────────────────────────────────────────────────────
 async function loginMarketData() {
   const parent = getParent();
@@ -36,7 +65,7 @@ async function loginMarketData() {
   MARKET_BASE = parent?.rootUrl || BASE_DEFAULT;
 
   if (!APP_KEY || !SECRET_KEY) {
-    console.warn("⚠️  Missing Market Data API Key/Secret — add a Parent client via User Management (or set MARKET_APP_KEY / MARKET_SECRET_KEY in .env).");
+    console.warn("⚠️  Missing Market Data API Key/Secret — add a Parent client in the Admin console (or MARKET_APP_KEY / MARKET_SECRET_KEY in .env).");
     return null;
   }
 
@@ -44,200 +73,264 @@ async function loginMarketData() {
   const primary = (process.env.MARKET_SOURCE || parent?.source || process.env.XTS_SOURCE || "WEBAPI").toUpperCase();
   const other   = primary === "CTCL" ? "WEBAPI" : "CTCL";
 
-  console.log(`🔐 Market Data → ${url}`);
-  console.log(`   key=${APP_KEY.slice(0,6)}…   secret=${SECRET_KEY.slice(0,4)}…`);
-
   for (const source of [primary, other]) {
-    console.log(`   Trying source=${source} …`);
     try {
-      const { data } = await axios.post(url, { appKey: APP_KEY, secretKey: SECRET_KEY, source });
+      const { data } = await axios.post(url, { appKey: APP_KEY, secretKey: SECRET_KEY, source }, { timeout: 10000 });
       if (data.type === "success") {
         marketToken  = data.result.token;
         marketUserID = data.result.userID;
-        console.log(`✅ Market Data logged in  source=${source}  userID=${marketUserID}`);
+        console.log(`✅ Market Data logged in (source=${source}, userID=${marketUserID})`);
         return marketToken;
       }
-      console.warn(`   source=${source} rejected: [${data.code}] ${data.description}`);
+      stats.lastError = `[${data.code}] ${data.description}`;
+      console.warn(`   Market Data login source=${source} rejected: ${stats.lastError}`);
     } catch (err) {
-      const body = err.response?.data;
-      console.warn(`   source=${source} error: HTTP ${err.response?.status || err.message}`);
-      if (body) console.warn(`   Response:`, JSON.stringify(body));
+      stats.lastError = err.response?.data?.description || err.message;
+      console.warn(`   Market Data login source=${source} failed: ${stats.lastError}`);
     }
   }
-
   console.error("❌ Market Data login failed.");
   return null;
 }
 
 // ─────────────────────────────────────────────────────────────
-// SOCKET
+// SOCKET — tick stream
 // ─────────────────────────────────────────────────────────────
+function closeSocket() {
+  joined = false;
+  if (!socket) return;
+  try { socket.removeAllListeners(); socket.close(); } catch (_) {}
+  socket = null;
+}
+
+function onTick(raw) {
+  stats.ticks++;
+  const data = typeof raw === "string" ? (() => { try { return JSON.parse(raw); } catch { return raw; } })() : raw;
+  parseQuote(data);
+}
+
 function connectMarketSocket() {
   if (!marketToken) { console.warn("⚠️  No market token — socket skipped."); return; }
-
-  // Clean up any previous connection first — this function can now be
-  // called more than once per process (e.g. re-run after the Parent's
-  // Market Data credentials are added/edited via User Management).
-  stopRefresh();
-  if (socket) {
-    try { socket.removeAllListeners(); socket.disconnect(); } catch (_) {}
-    socket = null;
-  }
+  closeSocket();
 
   socket = io(MARKET_BASE, {
-    path:          "/apimarketdata/socket.io",
-    transports:    ["websocket"],
-    reconnection:  true,
-    reconnectionAttempts: 10,
-    reconnectionDelay:    5000,
+    path: "/apimarketdata/socket.io",
+    transports: ["websocket"],
+    reconnection: true,           // network blips: socket.io retries by itself
+    reconnectionDelay: 1000,
+    reconnectionDelayMax: 5000,
+    timeout: 10000,
     query: { token: marketToken, userID: marketUserID, publishFormat: "JSON", broadcastMode: "Full" },
   });
 
+  let joinFallback = null;
   socket.on("connect", () => {
-    console.log("✅ Market Data Socket connected");
-    if (subscribedMap.size > 0) _bulkSubscribe([...subscribedMap.keys()]);
-    startRefresh();
+    console.log("✅ Market Data socket connected");
+    // Subscribe once the broker confirms the join; fall back after 2 s.
+    clearTimeout(joinFallback);
+    joinFallback = setTimeout(() => { if (!joined) { joined = true; resubscribeAll(); } }, 2000);
   });
-
-  socket.on("joined",        (d) => console.log("JOINED:", typeof d === "string" ? d.slice(0,80) : JSON.stringify(d).slice(0,80)));
-  socket.on("disconnect",    (r) => { console.log("🔴 Market Socket disconnected:", r); stopRefresh(); });
-  socket.on("connect_error", (e) => console.error("❌ Market socket error:", e.message));
-
-  ["1501-json-full","1501-json-partial","1502-json-full","1502-json-partial"].forEach(ev => {
-    socket.on(ev, raw => {
-      rawEventCounts[ev] = (rawEventCounts[ev] || 0) + 1;
-      const data = typeof raw === "string"
-        ? (() => { try { return JSON.parse(raw); } catch { return raw; } })()
-        : raw;
-      parseQuote(data);
-    });
+  socket.on("joined", () => {
+    clearTimeout(joinFallback);
+    if (!joined) { joined = true; resubscribeAll(); }
   });
+  socket.on("disconnect", reason => {
+    joined = false;
+    console.warn(`🔴 Market Data socket disconnected: ${reason}`);
+    // The broker closed it (session ended / taken over): socket.io will not
+    // retry this case, so log in again. Other reasons reconnect by themselves.
+    if (reason === "io server disconnect") recover("the broker closed the market-data session");
+  });
+  socket.on("logout", () => recover("the broker logged the market-data session out"));
+  socket.on("connect_error", e => { stats.lastError = e.message; });
 
-  setInterval(() => {
-    const total = Object.values(rawEventCounts).reduce((a,b) => a+b, 0);
-    console.log(`💓 WS: ${total} event(s) | refresh: ${refreshTimer ? "ON" : "OFF"} | ${subscribedMap.size} token(s)`);
-    Object.keys(rawEventCounts).forEach(k => rawEventCounts[k] = 0);
-  }, 10_000);
-}
+  ["1501-json-full", "1501-json-partial", "1502-json-full", "1502-json-partial"].forEach(ev => socket.on(ev, onTick));
 
-// ─────────────────────────────────────────────────────────────
-// SNAPSHOT REFRESH
-// REST quote endpoint 404s on this server. The SUBSCRIBE response
-// itself contains listQuotes with current prices — so we call
-// subscribe every 2 seconds for all tracked tokens to get fresh
-// snapshots. Works even when server returns "already subscribed"
-// because the snapshot is in the response body either way.
-// ─────────────────────────────────────────────────────────────
-function startRefresh() {
-  if (refreshTimer) return;
-  console.log("🔄 Snapshot refresh started (2s interval)");
-  refreshTimer = setInterval(forceRefresh, 2000);
-}
-
-function stopRefresh() {
-  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
-}
-
-// Which subscribe URL works — discovered on first successful call
-let _subUrl = null;
-
-async function forceRefresh() {
-  if (!marketToken || subscribedMap.size === 0) return;
-
-  const instruments = [...subscribedMap.entries()].map(([token, info]) => ({
-    exchangeSegment:      info.xtsSegmentCode,
-    exchangeInstrumentID: Number(token),
-  }));
-
-  const urls = _subUrl
-    ? [_subUrl]
-    : [`${MARKET_BASE}/apimarketdata/instruments/subscription`, `${MARKET_BASE}/marketdata/instruments/subscription`];
-
-  for (const url of urls) {
-    try {
-      const res = await axios.post(url,
-        { instruments, xtsMessageCode: 1501 },
-        { headers: { Authorization: marketToken, "Content-Type": "application/json" } }
-      );
-
-      if (!_subUrl) { _subUrl = url; console.log(`✅ Subscribe URL: ${url.replace(MARKET_BASE,"")}`); }
-
-      // Parse snapshot from response
-      _parseListQuotes(res.data?.result?.listQuotes);
-      return;
-
-    } catch (err) {
-      const d      = err.response?.data;
-      const status = err.response?.status;
-
-      // "Already subscribed" still returns quotes in some 5paisa versions
-      if (d?.code === "e-session-0002") {
-        _parseListQuotes(d?.result?.listQuotes);
-        if (!_subUrl) _subUrl = url;
-        return;
-      }
-
-      if (status === 404) continue;
-      // Other error — log once and stop spamming
-      console.warn("Refresh error:", d?.description || err.message);
-
-if (d?.description === "Invalid Token") {
-
-    console.log("♻️ Re-login Market Data...");
-
-    stopRefresh();
-
-    socket?.disconnect();
-
-    marketToken = null;
-    marketUserID = null;
-
-    await loginMarketData();
-
-    connectMarketSocket();
-}
-
-return;
-    }
+  if (!heartbeatTimer) {
+    heartbeatTimer = setInterval(() => {
+      stats.ticksLastMinute = stats.ticks;
+      stats.ticks = 0;
+      console.log(`📈 Market data: ${stats.ticksLastMinute} tick(s)/min | ${subscribedMap.size} token(s) | socket ${socket?.connected ? (joined ? "live" : "joining") : "down"}`);
+    }, 60_000);
+    heartbeatTimer.unref?.();
   }
 }
 
-function _parseListQuotes(list) {
-  if (!Array.isArray(list)) return;
-  list.forEach(q => {
-    try { parseQuote(typeof q === "string" ? JSON.parse(q) : q); } catch {}
-  });
+// One re-login at a time; repeated take-overs are reported and slowed down.
+let recovering = null;
+function recover(reason) {
+  if (recovering) return recovering;
+  recovering = (async () => {
+    const now = Date.now();
+    stats.recoveries = stats.recoveries.filter(t => now - t < 5 * 60_000);
+    stats.recoveries.push(now);
+    if (stats.recoveries.length >= 3) {
+      if (now - stats.takeoverWarnedAt > 5 * 60_000) {
+        stats.takeoverWarnedAt = now;
+        console.error("⚠️  The market-data session keeps being taken over. Another login is using the SAME Market Data API key " +
+          "(another running copy of this backend, or another app/script). Only one can stay connected — stop the other one. Retrying in 30 s.");
+      }
+      await sleep(TAKEOVER_BACKOFF_MS);
+    }
+    console.warn(`♻️  Market data: ${reason} — logging in again`);
+    closeSocket();
+    marketToken = null;
+    for (let i = 0; i < 6 && !marketToken; i++) {
+      if (await loginMarketData()) break;
+      await sleep(Math.min(30_000, RELOGIN_BASE_MS * 2 ** i));
+    }
+    if (marketToken) connectMarketSocket();   // "joined" → resubscribeAll()
+  })().finally(() => { recovering = null; });
+  return recovering;
 }
 
 // ─────────────────────────────────────────────────────────────
-// PARSE BID / ASK
+// SUBSCRIPTION (REST) — POST subscribe / PUT unsubscribe
+// ─────────────────────────────────────────────────────────────
+function instrumentsFor(tokens) {
+  return tokens.map(t => ({
+    exchangeSegment: Number(subscribedMap.get(t)?.xtsSegmentCode || getSegmentForToken(t).xtsSegmentCode),
+    exchangeInstrumentID: Number(t),
+  }));
+}
+
+// Sends one chunk; returns the snapshot list (if any). Throws on failure;
+// err.invalidToken marks an ended session.
+async function sendChunk(method, instruments) {
+  const paths = subPath ? [subPath] : SUB_PATHS;
+  let lastErr;
+  for (const p of paths) {
+    try {
+      const res = await axios({
+        method, url: `${MARKET_BASE}${p}`, timeout: 10000,
+        data: { instruments, xtsMessageCode: 1501 },
+        headers: { Authorization: marketToken, "Content-Type": "application/json" },
+      });
+      subPath = p;
+      return res.data?.result?.listQuotes || [];
+    } catch (err) {
+      const d = err.response?.data;
+      if (d?.code === "e-session-0002") { subPath = p; return d?.result?.listQuotes || []; } // already subscribed
+      if (isInvalidToken(d)) throw Object.assign(new Error("Invalid Token"), { invalidToken: true });
+      lastErr = Object.assign(new Error(d?.description || err.message), { status: err.response?.status });
+      if (err.response?.status === 404 && !subPath) continue;
+      throw lastErr;
+    }
+  }
+  throw lastErr;
+}
+
+function parseSnapshots(list) {
+  if (!Array.isArray(list)) return;
+  list.forEach(q => { try { parseQuote(typeof q === "string" ? JSON.parse(q) : q); } catch (_) {} });
+}
+
+async function sendSubscription(method, tokens) {
+  for (let i = 0; i < tokens.length; i += CHUNK) {
+    const chunk = tokens.slice(i, i + CHUNK);
+    parseSnapshots(await sendChunk(method, instrumentsFor(chunk)));
+  }
+}
+
+async function resubscribeAll() {
+  const tokens = [...subscribedMap.keys()];
+  if (!tokens.length || !marketToken) return;
+  try {
+    await sendSubscription("post", tokens);
+    console.log(`📡 Subscribed ${tokens.length} token(s) on the market-data session`);
+  } catch (err) {
+    if (err.invalidToken) return recover("the market-data token was rejected");
+    stats.lastError = err.message;
+    console.warn(`⚠️  Re-subscribe failed: ${err.message}`);
+  }
+}
+
+async function subscribeTokens(tokens, segmentsArray, owner = "ui") {
+  if (!tokens?.length) return;
+
+  // Segment per token, keyed by token (not by position after filtering).
+  const segFor = new Map();
+  tokens.forEach((t, i) => { const k = String(t); if (!segFor.has(k)) segFor.set(k, segmentsArray?.[i]); });
+
+  const fresh = [];
+  for (const [t, seg] of segFor) {
+    if (!owners.has(t)) owners.set(t, new Set());
+    owners.get(t).add(owner);
+    if (!subscribedMap.has(t)) {
+      subscribedMap.set(t, { xtsSegmentCode: seg ? xtsSegCode(seg) : getSegmentForToken(t).xtsSegmentCode });
+      fresh.push(t);
+    }
+  }
+  // Without a session yet, the tokens are kept and subscribed on (re)join.
+  if (!fresh.length || !marketToken || !joined) return;
+
+  try {
+    await sendSubscription("post", fresh);
+  } catch (err) {
+    if (err.invalidToken) { recover("the market-data token was rejected"); return; }
+    stats.lastError = err.message;
+    console.warn(`⚠️  Subscribe ${fresh.join(",")} failed: ${err.message}`);
+  }
+}
+
+async function unsubscribeTokens(tokens, owner = "ui") {
+  if (!tokens?.length) return;
+
+  // Release only tokens that no other owner still needs.
+  const release = tokens.map(String).filter(t => {
+    const set = owners.get(t);
+    if (set) {
+      set.delete(owner);
+      if (set.size) return false;
+      owners.delete(t);
+    }
+    return subscribedMap.has(t);
+  });
+  if (!release.length) return;
+
+  // Local first: the token stops showing prices immediately, whatever the broker says.
+  for (const t of release) {
+    subscribedMap.delete(t);
+    delete liveQuotes[t];
+    notify({ [t]: { removed: true } });
+  }
+
+  if (!marketToken || !joined) return; // a new session will simply not include them
+  try {
+    // instrumentsFor() falls back to the instrument master for the segment.
+    await sendSubscription("put", release);
+  } catch (err) {
+    if (!err.invalidToken) console.warn(`⚠️  Unsubscribe ${release.join(",")} failed at the broker: ${err.message}`);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// PARSE BID / ASK / LTP
 // ─────────────────────────────────────────────────────────────
 function parseQuote(raw) {
   try {
-    if (typeof raw !== "string") {
+    if (raw && typeof raw === "object") {
       const token = String(raw.ExchangeInstrumentID || "");
       if (!token) return null;
 
       const tl  = raw.Touchline || raw.TouchLine || {};
-      const ask = Number(raw.AskInfo?.Price  ?? raw.AskInfo?.AskPrice  ?? tl.AskInfo?.Price  ?? tl.BestAskPrice  ?? 0);
-      const bid = Number(raw.BidInfo?.Price  ?? raw.BidInfo?.BidPrice  ?? tl.BidInfo?.Price  ?? tl.BestBidPrice  ?? 0);
+      const ask = Number(raw.AskInfo?.Price ?? raw.AskInfo?.AskPrice ?? tl.AskInfo?.Price ?? tl.BestAskPrice ?? 0);
+      const bid = Number(raw.BidInfo?.Price ?? raw.BidInfo?.BidPrice ?? tl.BidInfo?.Price ?? tl.BestBidPrice ?? 0);
       const ltp = Number(raw.LastTradedPrice ?? raw.LTP ?? tl.LastTradedPrice ?? tl.LTP ?? 0);
 
-      if (ask > 0 || bid > 0) console.log(`✅ Quote  token=${token}  bid=${bid}  ask=${ask}  ltp=${ltp}`);
       _emit(token, bid, ask, ltp);
       return { token, bid, ask, ltp };
     }
 
-    if (raw.startsWith("{")) return null;
+    if (typeof raw !== "string" || raw.startsWith("{")) return null;
 
-    // CSV
+    // Partial (CSV-like) format: t:2_45350,ltp:731,ai:0|0|734.25,bi:0|0|730.15,…
     const obj = {};
     raw.split(",").forEach(item => {
       const idx = item.indexOf(":");
       if (idx === -1) return;
       obj[item.substring(0, idx).trim()] = item.substring(idx + 1).trim();
     });
-
     const token = obj.t?.split("_")[1];
     if (!token) return null;
 
@@ -246,10 +339,8 @@ function parseQuote(raw) {
     const bid = p0(obj.bi);
     const ltp = Number(obj.ltp) || 0;
 
-    if (ask > 0 || bid > 0) console.log(`✅ Quote(CSV)  token=${token}  bid=${bid}  ask=${ask}`);
     _emit(token, bid, ask, ltp);
     return { token, bid, ask, ltp };
-
   } catch (err) {
     console.error("parseQuote error:", err.message);
     return null;
@@ -257,321 +348,60 @@ function parseQuote(raw) {
 }
 
 function _emit(token, bid, ask, ltp = 0) {
-
   token = String(token);
-
-  // Ignore quotes for unsubscribed tokens
-  if (!subscribedMap.has(token)) {
-    return;
-  }
+  if (!subscribedMap.has(token)) return;             // never publish unsubscribed tokens
 
   const prev = liveQuotes[token];
+  if (prev && prev.bid === bid && prev.ask === ask && prev.ltp === ltp) return; // nothing changed
 
-  // Emit only if something changed
-  if (
-    prev &&
-    prev.bid === bid &&
-    prev.ask === ask &&
-    prev.ltp === ltp
-  ) {
-    return;
-  }
-
-  liveQuotes[token] = {
-    bid,
-    ask,
-    ltp,
-    hasData: true,
-  };
-
-  if (quoteCallback) {
-    quoteCallback({
-      [token]: {
-        bid,
-        ask,
-        ltp,
-        hasData: true,
-      },
-    });
-  }
+  const ts = Date.now();
+  liveQuotes[token] = { bid, ask, ltp, hasData: true, ts };
+  stats.lastTickAt = ts;
+  notify({ [token]: liveQuotes[token] });
 }
 
 // ─────────────────────────────────────────────────────────────
-// SUBSCRIBE
-// ─────────────────────────────────────────────────────────────
-async function subscribeTokens(tokens, segmentsArray) {
-  if (!tokens?.length) return;
-
-  if (!marketToken) {
-    console.warn("⚠️ No market data token.");
-    return;
-  }
-
-  const newTokens = [...new Set(tokens.map(String))]
-    .filter(t => !subscribedMap.has(t));
-
-  if (!newTokens.length) return;
-
-  const segCodes = newTokens.map((token, idx) => {
-    const seg = segmentsArray?.[idx]
-      ? xtsSegCode(segmentsArray[idx])
-      : getSegmentForToken(token).xtsSegmentCode;
-
-    console.log(
-      `Token=${token} Segment=${segmentsArray?.[idx] || "AUTO"} XTS=${seg}`
-    );
-
-    return seg;
-  });
-
-  const instruments = newTokens.map((token, idx) => ({
-    exchangeSegment: Number(segCodes[idx]),
-    exchangeInstrumentID: Number(token),
-  }));
-
-  console.log("\n==============================");
-  console.log("SUBSCRIBE REQUEST");
-  console.table(instruments);
-
-  const urls = _subUrl
-    ? [_subUrl]
-    : [
-        `${MARKET_BASE}/apimarketdata/instruments/subscription`,
-        `${MARKET_BASE}/marketdata/instruments/subscription`
-      ];
-
-  for (const url of urls) {
-
-    try {
-
-      const res = await axios.post(
-        url,
-        {
-          instruments,
-          xtsMessageCode: 1501
-        },
-        {
-          headers: {
-            Authorization: marketToken,
-            "Content-Type": "application/json"
-          }
-        }
-      );
-
-      console.log("\nSUBSCRIBE RESPONSE");
-      console.log(JSON.stringify(res.data, null, 2));
-
-      if (!_subUrl) {
-        _subUrl = url;
-      }
-
-      newTokens.forEach((t, i) =>
-        subscribedMap.set(t, {
-          xtsSegmentCode: segCodes[i]
-        })
-      );
-
-      console.log(`✅ Subscribed ${newTokens.length} token(s)`);
-
-      _parseListQuotes(res.data?.result?.listQuotes);
-
-      startRefresh();
-
-      return;
-
-    } catch (err) {
-
-      const d = err.response?.data;
-
-      console.log("\n==============================");
-      console.log("SUBSCRIBE FAILED");
-
-      console.table(instruments);
-
-      console.log("HTTP:", err.response?.status);
-
-      console.log(
-        JSON.stringify(d, null, 2)
-      );
-
-      if (d?.code === "e-session-0002") {
-
-        console.log("Already subscribed.");
-
-        newTokens.forEach((t, i) =>
-          subscribedMap.set(t, {
-            xtsSegmentCode: segCodes[i]
-          })
-        );
-
-        _parseListQuotes(d?.result?.listQuotes);
-
-        if (!_subUrl) _subUrl = url;
-
-        startRefresh();
-
-        return;
-      }
-
-      if (err.response?.status === 404)
-        continue;
-
-      return;
-    }
-  }
-}
-
-// ─────────────────────────────────────────────────────────────
-// UNSUBSCRIBE — server has no working endpoint; clear locally
-// so next subscribeTokens makes a fresh server call for that token
-// ─────────────────────────────────────────────────────────────
-async function unsubscribeTokens(tokens) {
-
-  if (!tokens?.length || !marketToken) return;
-
-  const instruments = tokens.map(token => {
-
-    const info = subscribedMap.get(String(token)) || getSegmentForToken(token);
-
-    return {
-      exchangeSegment: Number(info.xtsSegmentCode),
-      exchangeInstrumentID: Number(token)
-    };
-  });
-
-  try {
-
-    const res = await axios.put(
-      `${MARKET_BASE}/apimarketdata/instruments/subscription`,
-      {
-        instruments,
-        xtsMessageCode: 1501
-      },
-      {
-        headers: {
-          Authorization: marketToken,
-          "Content-Type": "application/json"
-        }
-      }
-    );
-
-    console.log("UNSUBSCRIBE RESPONSE");
-    console.log(JSON.stringify(res.data, null, 2));
-
-    tokens.forEach(t => {
-
-  const token = String(t);
-
-  subscribedMap.delete(token);
-  delete liveQuotes[token];if (quoteCallback) {
-    quoteCallback({
-        [token]: {
-            removed: true
-        }
-    });
-    console.log("Subscribed:", [...subscribedMap.keys()]);
-console.log("LiveQuotes :", Object.keys(liveQuotes));
-}
-
-  console.log(`🗑 Removed ${token}`);
-
-});
-
-console.log("Remaining subscribed tokens:");
-console.log([...subscribedMap.keys()]);
-
-    console.log(`✅ Unsubscribed ${tokens.length} token(s)`);
-
-  } catch (err) {
-
-    console.error("UNSUBSCRIBE FAILED");
-
-    console.log(
-      JSON.stringify(err.response?.data || err.message, null, 2)
-    );
-  }
-}
-// ─────────────────────────────────────────────────────────────
-// Helpers
+// Helpers / status
 // ─────────────────────────────────────────────────────────────
 function xtsSegCode(seg) {
   const m = {
-  NSECM:1,
-  NSEFO:2,
-  NSECD:3,
-
-  BSECM:11,
-  BSEFO:12,
-  BSECD:13,
-
-  MCXFO:51,
-  NCDEX:21,
-
-  NSE:1,
-  NSE_EQ:1,
-  NSE_CM:1,
-
-  BSE:11,
-  BSE_EQ:11,
-  BSE_CM:11,
-
-  NSE_FO:2,
-  BSE_FO:12,
-
-  MCX:51,
-  MCX_FO:51,
-
-  NSE_CD:3,
-  NCD_FO:3,
-
-  BCD_FO:13,
-
-  NSE_COM:51, // only if these are commodity contracts in your master
-
-  NSE_INDEX:1,
-  BSE_INDEX:11,
-};
-  return m[seg] || 2;
+    NSECM: 1, NSEFO: 2, NSECD: 3, BSECM: 11, BSEFO: 12, BSECD: 13, MCXFO: 51, NCDEX: 21,
+    NSE: 1, NSE_EQ: 1, NSE_CM: 1, NSE_INDEX: 1,
+    BSE: 11, BSE_EQ: 11, BSE_CM: 11, BSE_INDEX: 11,
+    NSE_FO: 2, BSE_FO: 12,
+    MCX: 51, MCX_FO: 51, NSE_COM: 51,
+    NSE_CD: 3, NCD_FO: 3, BCD_FO: 13,
+  };
+  return m[String(seg || "").toUpperCase()] || 2;
 }
 
-async function _bulkSubscribe(tokenList) {
-  const instruments = tokenList.map(t => {
-    const info = subscribedMap.get(t) || getSegmentForToken(t);
-    return { exchangeSegment: info.xtsSegmentCode, exchangeInstrumentID: Number(t) };
-  });
-  if (!instruments.length) return;
-  const urls = _subUrl
-    ? [_subUrl]
-    : [`${MARKET_BASE}/apimarketdata/instruments/subscription`, `${MARKET_BASE}/marketdata/instruments/subscription`];
-  for (const url of urls) {
-    try {
-      const res = await axios.post(url, { instruments, xtsMessageCode: 1501 },
-        { headers: { Authorization: marketToken } });
-      _parseListQuotes(res.data?.result?.listQuotes);
-      console.log(`📡 Re-subscribed ${instruments.length} token(s) after reconnect`);
-      return;
-    } catch (err) {
-      if (err.response?.status === 404) continue;
-      _parseListQuotes(err.response?.data?.result?.listQuotes);
-      return;
-    }
-  }
+function getMarketStatus() {
+  const now = Date.now();
+  const recent = stats.recoveries.filter(t => now - t < 5 * 60_000).length;
+  return {
+    loggedIn:          !!marketToken,
+    socketConnected:   !!socket?.connected,
+    joined,
+    subscribedTokens:  subscribedMap.size,
+    ticksLastMinute:   stats.ticksLastMinute,
+    lastTickAt:        stats.lastTickAt ? new Date(stats.lastTickAt).toISOString() : null,
+    lastTickAgeMs:     stats.lastTickAt ? now - stats.lastTickAt : null,
+    reloginsLast5Min:  recent,
+    takeoverSuspected: recent >= 3,
+    lastError:         stats.lastError,
+    rootUrl:           MARKET_BASE,
+  };
 }
 
-function onPriceUpdate(cb) { quoteCallback = cb; }
+function onPriceUpdate(cb) { quoteListeners.add(cb); return () => quoteListeners.delete(cb); }
+
 function getLivePrices() {
-
-    const out = {};
-
-    for (const token of subscribedMap.keys()) {
-
-        if (liveQuotes[token]) {
-            out[token] = liveQuotes[token];
-        }
-
-    }
-
-    return out;
+  const out = {};
+  for (const token of subscribedMap.keys()) if (liveQuotes[token]) out[token] = liveQuotes[token];
+  return out;
 }
 
-module.exports = { loginMarketData, connectMarketSocket, subscribeTokens, unsubscribeTokens, onPriceUpdate, getLivePrices, parseQuote };
+module.exports = {
+  loginMarketData, connectMarketSocket, subscribeTokens, unsubscribeTokens,
+  onPriceUpdate, getLivePrices, getMarketStatus, parseQuote,
+};

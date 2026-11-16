@@ -9,6 +9,10 @@ axios.defaults.timeout = 10000;
 // Single shared agent (see httpAgent.js) — keeps every request on the
 // same connection so the outbound IP stays consistent with login.
 
+// Every order and status poll passes through the per-client guard: orders
+// are spaced out and capped per minute before they can reach the broker.
+const { getSharedGuard } = require("./orderGuard");
+
 const BASE = process.env.XTS_INTERACTIVE_URL || "https://xtsmum.5paisa.com";
 
 // Per-client Root URL override, settable from User Management. Falls back
@@ -102,10 +106,10 @@ async function logoutClient(client) {
 // ORDERS
 // ─────────────────────────────────────────────────────────────
 async function placeOrder(client, payload) {
+  await getSharedGuard().beforeOrder(client.id); // throws a 429-style refusal when over the limit
+  const sentAt = Date.now();
   try {
-    console.log("========== ORDER PAYLOAD ==========");
-    console.log(JSON.stringify(payload, null, 2));
-
+    // Nothing is logged before the request leaves — logging waits until after.
     const res = await axios.post(
       `${baseFor(client)}/interactive/orders`,
       payload,
@@ -118,12 +122,18 @@ async function placeOrder(client, payload) {
 
     if (!ok(res)) {
       console.log("Response:", JSON.stringify(d, null, 2));
-      throw new Error(d.description || d.message || "Order failed");
+      // Attach the response: the broker answered, so this is a definite
+      // rejection (safe to retry), not an unknown outcome like a timeout.
+      const rejection = new Error(d.description || d.message || "Order failed");
+      rejection.response = res;
+      throw rejection;
     }
 
+    console.log(`📤 ${client.id} ${payload.orderSide} ${payload.orderQuantity} × ${payload.exchangeInstrumentID} @${payload.limitPrice} → AppOrderID ${d.result?.AppOrderID} (${Date.now() - sentAt} ms)`);
     return d.result;
 
   } catch (err) {
+    console.log("Order payload:", JSON.stringify(payload));
 
     console.log("========== ORDER ERROR ==========");
 
@@ -140,6 +150,7 @@ async function placeOrder(client, payload) {
 
 async function getOrders(client) {
   try {
+    await getSharedGuard().beforePoll(client.id);
     const res = await axios.get(`${baseFor(client)}/interactive/orders`, {
       headers: hdr(client.token),
       params: { clientID: client.userID },
@@ -232,6 +243,7 @@ async function getPositions(client) {
 // retrying with a fresh price for that remaining qty only.
 // ─────────────────────────────────────────────────────────────
 async function cancelOrder(client, appOrderId) {
+  await getSharedGuard().beforeOrder(client.id);
   const uid = `CAN_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
   try {
@@ -270,7 +282,8 @@ async function cancelOrder(client, appOrderId) {
 // GET ORDER HISTORY
 // Mirrors XTSSession.get_order_history() in execution.py
 // Returns array of order state records; last entry = latest.
-// MLO poll loop calls this every 0.5s to check fill status.
+// MLO poll loop calls this every pollInterval to check fill status
+// (kept quiet — it runs several times a second during execution).
 //
 // XTS endpoint: GET /interactive/orders/history?appOrderID=X
 // Response: { type:"success", result: [ { OrderStatus, CumulativeQuantity,
@@ -278,6 +291,7 @@ async function cancelOrder(client, appOrderId) {
 // ─────────────────────────────────────────────────────────────
 async function getOrderHistory(client, appOrderId) {
   try {
+    await getSharedGuard().beforePoll(client.id);
     const res = await axios.get(
       `${baseFor(client)}/interactive/orders/history`,
       {
@@ -288,10 +302,6 @@ async function getOrderHistory(client, appOrderId) {
         },
       }
     );
-
-    console.log("========== ORDER HISTORY ==========");
-    console.log("AppOrderID:", appOrderId);
-    console.log(JSON.stringify(res.data, null, 2));
 
     const d = res.data;
 
@@ -321,4 +331,32 @@ async function getOrderHistory(client, appOrderId) {
   }
 }
 
-module.exports = { loginClient, logoutClient, placeOrder, cancelOrder, getOrderHistory, getOrders, getTrades, getPositions };
+// ─────────────────────────────────────────────────────────────
+// BALANCE / MARGIN (read-only) — parsed by margin.js
+// ─────────────────────────────────────────────────────────────
+async function getBalance(client) {
+  await getSharedGuard().beforePoll(client.id);
+  const res = await axios.get(`${baseFor(client)}/interactive/user/balance`, {
+    headers: hdr(client.token),
+    params: { clientID: client.userID },
+  });
+  if (res.data?.type !== "success") {
+    throw new Error(res.data?.description || "Balance request failed");
+  }
+  return res.data.result;
+}
+
+// ─────────────────────────────────────────────────────────────
+// ORDER-UPDATE STREAM (receive only) — see orderStream.js
+// ─────────────────────────────────────────────────────────────
+function connectOrderStream(client) {
+  require("./orderStream").connect(client, baseFor(client));
+}
+function disconnectOrderStream(client) {
+  require("./orderStream").disconnect(client.id);
+}
+
+module.exports = {
+  loginClient, logoutClient, placeOrder, cancelOrder, getOrderHistory, getOrders, getTrades, getPositions,
+  connectOrderStream, disconnectOrderStream, getBalance,
+};

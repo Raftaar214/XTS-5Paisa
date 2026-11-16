@@ -1,5 +1,9 @@
+// Quiet by default: heavy console output can corrupt node --test reporting. TEST_VERBOSE=1 to see logs.
+if (!process.env.TEST_VERBOSE) { console.log = console.info = console.warn = console.error = () => {}; }
+const BACKEND = require("path").join(__dirname, "..", "backend");
+
 const assert = require('assert');
-const { encodeQuotePacket, decodeQuotePacket } = require('./quotePacket');
+const { encodeQuotePacket, decodeQuotePacket } = require(BACKEND + '/quotePacket');
 
 const payload = {
   '12345': { bid: 101.25, ask: 101.5, ltp: 101.4, hasData: true },
