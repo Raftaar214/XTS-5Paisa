@@ -20,9 +20,7 @@ const BASE = process.env.XTS_INTERACTIVE_URL || "https://xtsmum.5paisa.com";
 // (which is the normal case — every client on the same broker shares it).
 function baseFor(client) { return (client && client.rootUrl) || BASE; }
 
-// ─────────────────────────────────────────────────────────────
 // Helpers
-// ─────────────────────────────────────────────────────────────
 function hdr(token) {
   return { authorization: token, "Content-Type": "application/json" };
 }
@@ -33,16 +31,14 @@ function ok(res) {
 
 function logErr(label, err) {
   if (err.response) {
-    console.error(`❌ ${label}: HTTP ${err.response.status}`);
+    console.error(`Error: ${label}: HTTP ${err.response.status}`);
     console.error(`   Body:`, JSON.stringify(err.response.data));
   } else {
-    console.error(`❌ ${label}:`, err.message);
+    console.error(`Error: ${label}:`, err.message);
   }
 }
 
-// ─────────────────────────────────────────────────────────────
 // SESSION
-// ─────────────────────────────────────────────────────────────
 async function loginClient(client) {
   // Try whatever source is configured FIRST — your account is confirmed
   // to work with WEBAPI. Only fall back to the other value if that fails,
@@ -52,7 +48,7 @@ async function loginClient(client) {
 
   let lastErr;
   for (const source of sources) {
-    console.log(`🔐 ${client.id} → source=${source}  key=${client.interactiveKey?.slice(0,6)}…`);
+    console.log(`${client.id}: logging in, source=${source}`);
     try {
       const res = await axios.post(`${baseFor(client)}/interactive/user/session`, {
         appKey:    client.interactiveKey,
@@ -66,7 +62,7 @@ async function loginClient(client) {
       if (d.type === "success") {
         const r      = d.result;
         const userID = r.clientCodes?.[0] || r.userID || client.id;
-        console.log(`✅ ${client.id} logged in  source=${source}  userID=${userID}`);
+        console.log(`${client.id} logged in  source=${source}  userID=${userID}`);
         return { token: r.token, userID };
       }
       console.warn(`   source=${source} rejected: [${d.code}] ${d.description}`);
@@ -88,7 +84,7 @@ async function loginClient(client) {
     }
   }
 
-  console.error(`❌ ${client.id} login failed with all sources.`);
+  console.error(`Error: ${client.id} login failed with all sources.`);
   throw lastErr || new Error("Login failed");
 }
 
@@ -102,9 +98,7 @@ async function logoutClient(client) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────
 // ORDERS
-// ─────────────────────────────────────────────────────────────
 async function placeOrder(client, payload) {
   await getSharedGuard().beforeOrder(client.id); // throws a 429-style refusal when over the limit
   const sentAt = Date.now();
@@ -129,13 +123,13 @@ async function placeOrder(client, payload) {
       throw rejection;
     }
 
-    console.log(`📤 ${client.id} ${payload.orderSide} ${payload.orderQuantity} × ${payload.exchangeInstrumentID} @${payload.limitPrice} → AppOrderID ${d.result?.AppOrderID} (${Date.now() - sentAt} ms)`);
+    console.log(`${client.id} ${payload.orderSide} ${payload.orderQuantity} × ${payload.exchangeInstrumentID} @${payload.limitPrice}, AppOrderID ${d.result?.AppOrderID} (${Date.now() - sentAt} ms)`);
     return d.result;
 
   } catch (err) {
     console.log("Order payload:", JSON.stringify(payload));
 
-    console.log("========== ORDER ERROR ==========");
+    console.log("Order error:");
 
     if (err.response) {
       console.log("Status :", err.response.status);
@@ -194,9 +188,7 @@ async function getTrades(client) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────
 // POSITIONS
-// ─────────────────────────────────────────────────────────────
 async function getPositions(client) {
   try {
     const res = await axios.get(`${baseFor(client)}/interactive/portfolio/positions`, {
@@ -235,13 +227,11 @@ async function getPositions(client) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────
 // CANCEL ORDER
 // Mirrors XTSSession.cancel_order() in execution.py
 // Called by MLO engine when fill_timeout is reached and qty
 // is still open — cancel the remaining unfilled portion before
 // retrying with a fresh price for that remaining qty only.
-// ─────────────────────────────────────────────────────────────
 async function cancelOrder(client, appOrderId) {
   await getSharedGuard().beforeOrder(client.id);
   const uid = `CAN_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -260,7 +250,7 @@ async function cancelOrder(client, appOrderId) {
       validateStatus: () => true,
     });
 
-    console.log("========== CANCEL RESPONSE ==========");
+    console.log("Cancel response:");
     console.log("Status:", res.status);
     console.log("Data:", JSON.stringify(res.data, null, 2));
 
@@ -278,7 +268,6 @@ async function cancelOrder(client, appOrderId) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────
 // GET ORDER HISTORY
 // Mirrors XTSSession.get_order_history() in execution.py
 // Returns array of order state records; last entry = latest.
@@ -288,7 +277,6 @@ async function cancelOrder(client, appOrderId) {
 // XTS endpoint: GET /interactive/orders/history?appOrderID=X
 // Response: { type:"success", result: [ { OrderStatus, CumulativeQuantity,
 //             OrderAverageTradedPrice, ... }, ... ] }
-// ─────────────────────────────────────────────────────────────
 async function getOrderHistory(client, appOrderId) {
   try {
     await getSharedGuard().beforePoll(client.id);
@@ -331,9 +319,7 @@ async function getOrderHistory(client, appOrderId) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────
 // BALANCE / MARGIN (read-only) — parsed by margin.js
-// ─────────────────────────────────────────────────────────────
 async function getBalance(client) {
   await getSharedGuard().beforePoll(client.id);
   const res = await axios.get(`${baseFor(client)}/interactive/user/balance`, {
@@ -346,9 +332,7 @@ async function getBalance(client) {
   return res.data.result;
 }
 
-// ─────────────────────────────────────────────────────────────
 // ORDER-UPDATE STREAM (receive only) — see orderStream.js
-// ─────────────────────────────────────────────────────────────
 function connectOrderStream(client) {
   require("./orderStream").connect(client, baseFor(client));
 }

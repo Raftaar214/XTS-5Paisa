@@ -29,7 +29,7 @@ function mockModule(request, exports, from = BACKEND) {
   require.cache[file] = m;
 }
 
-// ── fake broker ──
+// fake broker
 const broker = { logins: 0, token: null, calls: [], invalid: false };
 const sockets = [];
 function fakeIo(url, opts) {

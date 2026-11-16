@@ -20,19 +20,19 @@ const crypto = require("crypto");
 const path = require("path");
 const { writeJsonAtomic, readJson } = require("./fsutil");
 
-// ── One active session per dashboard user ──────────────────────
+// One active session per dashboard user
 // data/sessions.json: { username: { sid, ip, since, userAgent } }. A token is
 // valid only while its sid is the user's current session, so a second login
 // can't silently share an account; logging out (or being replaced) ends it.
 const SESSIONS_FILE = path.join(process.env.XTS_DATA_DIR || path.join(__dirname, "data"), "sessions.json");
 let sessions = readJson(SESSIONS_FILE, {}) || {};
-const lastSeen = new Map();          // username → ms (in memory only)
+const lastSeen = new Map();          // username -> ms (in memory only)
 const revokeListeners = new Set();   // notified with { username, sid, reason }
-const endedReasons = new Map();      // sid → why it ended ("replaced", "logout", "admin")
+const endedReasons = new Map();      // sid -> why it ended ("replaced", "logout", "admin")
 
 function saveSessions() {
   try { writeJsonAtomic(SESSIONS_FILE, sessions); }
-  catch (err) { console.error("⚠️  Could not save sessions:", err.message); }
+  catch (err) { console.error("Warning: Could not save sessions:", err.message); }
 }
 function activeSession(username) {
   const sess = sessions[username];
@@ -53,7 +53,7 @@ function endSession(username, reason) {
 }
 function onSessionEnded(fn) { revokeListeners.add(fn); return () => revokeListeners.delete(fn); }
 
-// ── Passwords changed in the Admin console ─────────────────────
+// Passwords changed in the Admin console
 // data/passwords.json: { users: { name: { salt, hash, changedAt } }, admin: { … } }
 const PASSWORDS_FILE = path.join(process.env.XTS_DATA_DIR || path.join(__dirname, "data"), "passwords.json");
 let overrides = readJson(PASSWORDS_FILE, {}) || {};
@@ -99,11 +99,11 @@ const ADMIN = process.env.ADMIN_USERNAME && process.env.ADMIN_PASSWORD
   : null;
 
 if (!process.env.AUTH_SECRET) {
-  console.warn("⚠️  AUTH_SECRET is not set in .env — using a random one-off secret for this run.");
+  console.warn("Warning: AUTH_SECRET is not set in .env — using a random one-off secret for this run.");
   console.warn("    Every server restart will force everyone to log in again until you set AUTH_SECRET.");
 }
 if (!ADMIN) {
-  console.warn("⚠️  ADMIN_USERNAME / ADMIN_PASSWORD are not set in .env — the Admin console is disabled.");
+  console.warn("Warning: ADMIN_USERNAME / ADMIN_PASSWORD are not set in .env — the Admin console is disabled.");
 }
 const SECRET = process.env.AUTH_SECRET || crypto.randomBytes(32).toString("hex");
 
@@ -175,7 +175,7 @@ function verifyUserToken(token) {
   return data;
 }
 
-// ── very small brute-force guard (per IP) ──
+// very small brute-force guard (per IP)
 const attempts = new Map(); // ip -> { count, first }
 const MAX_ATTEMPTS = 8;
 const WINDOW_MS     = 10 * 60 * 1000;
@@ -242,14 +242,14 @@ function login(req, res) {
         });
       }
       endSession(match.username, "replaced");
-      console.log(`🔒 Dashboard session of ${match.username} ended — a new login from ${ip} took over`);
+      console.log(`Dashboard session of ${match.username} ended — a new login from ${ip} took over`);
       return res.json({ success: true, loggedOutOther: true, message: "The other session was logged out. Log in again to continue." });
     }
     const sid = crypto.randomBytes(12).toString("hex");
     sessions[match.username] = { sid, ip, since: new Date().toISOString(), userAgent: String(req.headers["user-agent"] || "").slice(0, 160) };
     saveSessions();
     const { token, ttl } = createToken(match.username, "user", sid);
-    console.log(`✅ Dashboard login: ${match.username} from ${ip}`);
+    console.log(`Dashboard login: ${match.username} from ${ip}`);
     return res.json({ success: true, token, username: match.username, expiresInMs: ttl });
   }
 
@@ -272,11 +272,11 @@ function adminLogin(req, res) {
   if (ok) {
     clearAttempts(ip);
     const { token, ttl } = createToken(ADMIN.username, "admin");
-    console.log(`🛡️  Admin login: ${ADMIN.username} from ${ip}`);
+    console.log(`Admin login: ${ADMIN.username} from ${ip}`);
     return res.json({ success: true, token, username: ADMIN.username, expiresInMs: ttl });
   }
   recordFailure(ip);
-  console.warn(`⚠️  Failed admin login from ${ip}`);
+  console.warn(`Warning: Failed admin login from ${ip}`);
   return res.status(401).json({ error: "Invalid admin credentials" });
 }
 
@@ -293,7 +293,7 @@ function logout(req, res) {
   const data = verifyToken(extractToken(req));
   if (data?.scope === "user" && sessions[data.username]?.sid === data.sid) {
     endSession(data.username, "logout");
-    console.log(`👋 Dashboard logout: ${data.username}`);
+    console.log(`Dashboard logout: ${data.username}`);
   }
   res.json({ success: true });
 }

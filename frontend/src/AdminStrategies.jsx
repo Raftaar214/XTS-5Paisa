@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { Upload, Trash2, Download, Loader, Plus, Play, Square, OctagonX, PlayCircle } from "lucide-react";
+import { Upload, Trash2, Download, Loader, Plus, Play, Square, OctagonX, PlayCircle, Check, X, ChevronUp, ChevronDown } from "lucide-react";
 import { adminFetch, getAdminToken, API_BASE } from "./authFetch.js";
 import { downloadFile } from "./download.js";
 import JournalView from "./JournalView.jsx";
 
-// Admin console → Strategies.
+// Admin console -> Strategies.
 //   1. Upload strategy files (bt-strategy-config JSON, many at once)
 //   2. Assign a strategy to a dashboard user (PAPER or LIVE, capital, clients)
 //   3. Watch / control every assignment, and read everyone's trade book and log
@@ -13,7 +13,7 @@ const inputCls = "bg-[#161a1f] border border-gray-600 text-white text-[12px] px-
 const statusTone = {
   RUNNING: "text-emerald-400", STOPPING: "text-amber-400", PAUSED: "text-fuchsia-400", STOPPED: "text-gray-500",
 };
-const money = v => (v == null ? "—" : `${v >= 0 ? "" : "−"}₹${Math.abs(v).toFixed(0)}`);
+const money = v => (v == null ? "—" : `${v >= 0 ? "" : "-"}₹${Math.abs(v).toFixed(0)}`);
 const authHeader = () => ({ Authorization: `Bearer ${getAdminToken() || ""}` });
 
 function UploadBox({ onDone }) {
@@ -56,7 +56,7 @@ function UploadBox({ onDone }) {
       {results.length > 0 && (
         <div className="mt-2 space-y-0.5">
           {results.map((r, i) => (
-            <div key={i} className={`text-[10px] ${r.ok ? "text-emerald-400" : "text-red-400"}`}>{r.ok ? "✓" : "✗"} {r.file}: {r.msg}</div>
+            <div key={i} className={`flex items-center gap-1 text-[10px] ${r.ok ? "text-emerald-400" : "text-red-400"}`}>{r.ok ? <Check size={11} /> : <X size={11} />} {r.file}: {r.msg}</div>
           ))}
         </div>
       )}
@@ -138,7 +138,7 @@ function AssignForm({ strategies, users, clients, onDone }) {
 }
 
 // Capital each client gives to one strategy (₹). Lots for that client =
-// strategy lots × allocation ÷ the strategy capital. Blank = normal sizing.
+// strategy lots × allocation / the strategy capital. Blank = normal sizing.
 function AllocationEditor({ a, clients, onSave, busy }) {
   const mine = clients.filter(c => !c.assignedTo || c.assignedTo === a.username)
     .filter(c => !a.clientIds?.length || a.clientIds.includes(c.id));
@@ -147,7 +147,7 @@ function AllocationEditor({ a, clients, onSave, busy }) {
   return (
     <div className="bg-[#161a1f] border border-gray-700 rounded px-3 py-2 my-1">
       <div className="text-[10px] text-gray-400 mb-1.5">
-        Capital per client for <b className="text-gray-200">{a.strategyName}</b> — lots = strategy lots × allocation ÷ strategy capital ({base ? `₹${base.toLocaleString("en-IN")}` : "not set"}). Leave blank to use the client's normal sizing; 0 = this client does not run this strategy.
+        Capital per client for <b className="text-gray-200">{a.strategyName}</b> — lots = strategy lots × allocation / strategy capital ({base ? `₹${base.toLocaleString("en-IN")}` : "not set"}). Leave blank to use the client's normal sizing; 0 = this client does not run this strategy.
       </div>
       <div className="flex flex-wrap gap-3">
         {mine.map(c => {
@@ -281,7 +281,7 @@ export default function AdminStrategies() {
                       <>
                         <td className="px-2 py-1 text-gray-300">{s.summary.symbols.join(" + ")}</td>
                         <td className="px-2 py-1 text-gray-300 whitespace-nowrap">DTE {s.summary.entryDte.join(",")} · {s.summary.expiry.replace("_", " ")}</td>
-                        <td className="px-2 py-1 text-gray-300 whitespace-nowrap">{s.summary.groups.map(g => <div key={g.id}>{g.window} ×{g.entries}: {g.legs.join(", ")}</div>)}</td>
+                        <td className="px-2 py-1 text-gray-300 whitespace-nowrap">{s.summary.groups.map(g => <div key={g.id}>{g.window} ({g.entries} {g.entries === 1 ? "entry" : "entries"}): {g.legs.join(", ")}</div>)}</td>
                         <td className="px-2 py-1 text-gray-300 whitespace-nowrap">stop {s.summary.stop}<br />daily loss {s.summary.dailyLossPct ? `${s.summary.dailyLossPct}%` : "—"}<br />{s.summary.exit}</td>
                       </>
                     ) : <td colSpan={4} className="px-2 py-1 text-red-400">Invalid: {s.errors.join("; ")}</td>}
@@ -331,8 +331,8 @@ export default function AdminStrategies() {
                       <td className="px-2 py-1 text-gray-300">
                         {a.capital ? `₹${Number(a.capital).toLocaleString("en-IN")}` : "—"}
                         <button onClick={() => setAllocOpen(o => (o === a.assignmentId ? null : a.assignmentId))}
-                          className="block text-[9px] text-sky-300 hover:text-sky-200">
-                          Allocations{Object.keys(a.allocations || {}).length ? ` (${Object.keys(a.allocations).length})` : ""} {allocOpen === a.assignmentId ? "▲" : "▼"}
+                          className="flex items-center gap-0.5 text-[9px] text-sky-300 hover:text-sky-200">
+                          Allocations{Object.keys(a.allocations || {}).length ? ` (${Object.keys(a.allocations).length})` : ""} {allocOpen === a.assignmentId ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
                         </button>
                       </td>
                       <td className="px-2 py-1">

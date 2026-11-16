@@ -26,7 +26,7 @@ let { createRunner } = require(BACKEND + "/strategy/runner");
 
 const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", "0dte-v2_v38.strategy.json"), "utf8"));
 
-// ── market fixture: NIFTY expires Tue 2026-11-17 and Tue 2026-11-24 ──
+// market fixture: NIFTY expires Tue 2026-11-17 and Tue 2026-11-24
 const EXPIRY = "2026-11-17";
 const F = 24012, SIGMA = 0.35, R = 0.06;
 const instruments = [];
@@ -174,7 +174,7 @@ test("every PAPER fill gets its own paper order ID, on the position and in the t
 test("PAPER entries use the engine's retry logic: a run-away market is cancelled and re-priced", async () => {
   const a = setup();
   at(EXPIRY, "09:15"); runner.start(a.id, "nikhil");
-  // every bid halves the moment the first paper orders are placed → first attempt cannot fill
+  // every bid halves the moment the first paper orders are placed -> first attempt cannot fill
   const origPlace = paper.api.placeOrder;
   let placed = 0;
   paper.api.placeOrder = async (...args) => {
@@ -253,7 +253,7 @@ test("the daily loss limit squares off that client and blocks its further entrie
   const a = setup({ capital: 10_000 });
   at(EXPIRY, "09:15"); runner.start(a.id, "nikhil");
   at(EXPIRY, "09:20", 1); await runner.tick();
-  // every option up 3 points: P1 loses 2 legs × 75 × 3 = 450 ≥ 200; C1 loses 900 ≥ 400
+  // every option up 3 points: P1 loses 2 legs × 75 × 3 = 450 >= 200; C1 loses 900 >= 400
   for (const p of open(store.loadRun(a.id))) {
     const q = quotes[p.token];
     quotes[p.token] = { ...q, ltp: p.entryPrice + 3, ask: p.entryPrice + 3.1 };
@@ -326,6 +326,21 @@ test("LIVE mode sends legs through the execution engine with real quantities", a
   assert.deepStrictEqual(qtys, [75, 75, 150, 150]);
 });
 
+test("without live prices, PAPER entries are skipped too (no fills on old prices)", async () => {
+  let healthy = false;
+  runner = createRunner({ ...deps(), marketHealthy: () => healthy });
+  const a = setup({ mode: "PAPER" });
+  at(EXPIRY, "09:15"); runner.start(a.id, "nikhil");
+  at(EXPIRY, "09:20", 1); await runner.tick();
+  assert.strictEqual(open(store.loadRun(a.id)).length, 0, "09:20 skipped while prices were not live");
+  assert.ok(journal.read("events", EXPIRY, e => e.assignmentId === a.id).some(e => /Market data is not live/.test(e.message)));
+
+  healthy = true;
+  at(EXPIRY, "09:30", 1); await runner.tick();
+  assert.strictEqual(open(store.loadRun(a.id)).length, 4, "the next slot (4 legs) enters once prices are back");
+  runner.squareOff(a.id, "nikhil"); await runner.tick();
+});
+
 test("LIVE entries are skipped while trading is halted; PAPER still runs", async () => {
   settings.tradingHalted = true;
   const live = setup({ mode: "LIVE" });
@@ -353,7 +368,7 @@ test("global PAPER mode turns a LIVE assignment into paper — nothing reaches t
 });
 
 test("per-client capital allocation sizes each client's lots for this strategy", async () => {
-  // base capital ₹10L for the strategy; P1 allocated ₹30L (3 lots), C1 ₹5L (0.5 → 0 lots, skipped)
+  // base capital ₹10L for the strategy; P1 allocated ₹30L (3 lots), C1 ₹5L (0.5 -> 0 lots, skipped)
   const a = setup({ capital: 1_000_000 });
   store.updateAssignment(a.id, { allocations: { P1: 3_000_000, C1: 500_000 } });
   at(EXPIRY, "09:15"); runner.start(a.id, "nikhil");

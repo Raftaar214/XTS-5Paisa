@@ -39,10 +39,10 @@ function recordExecution(username, results) {
 function recordAudit(actor, action, detail = "") {
   const entry = { at: new Date().toISOString(), actor, action, detail: String(detail).slice(0, 300) };
   push(audit, entry, MAX_AUDIT);
-  console.log(`🛡️  [ADMIN] ${actor}: ${action}${detail ? ` — ${entry.detail}` : ""}`);
+  console.log(`[ADMIN] ${actor}: ${action}${detail ? ` — ${entry.detail}` : ""}`);
 }
 
-// ── Latency statistics (from trade-book rows: queueMs, ackMs, fillMs, totalMs) ──
+// Latency statistics (from trade-book rows: queueMs, ackMs, fillMs, totalMs)
 const LATENCY_METRICS = ["queueMs", "ackMs", "fillMs", "totalMs"];
 
 // Nearest-rank percentiles over the numeric values of one metric.

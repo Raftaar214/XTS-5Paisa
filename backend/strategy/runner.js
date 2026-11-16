@@ -2,7 +2,7 @@
 //
 // A one-second tick, in IST, for every assignment that is not STOPPED:
 //
-//   1. New IST day → reset the day's slots and daily-loss halts.
+//   1. New IST day -> reset the day's slots and daily-loss halts.
 //   2. Settle positions whose expiry has passed (15:30 IST on expiry day).
 //   3. During market hours: per-leg stops, intraday time exit, square-off
 //      requests and the per-client daily loss limit (risk-reducing exits run
@@ -34,24 +34,24 @@ function createRunner(deps) {
     store, journal, now = Date.now,
     getInstruments, getQuotes, subscribe, unsubscribe,
     clientsFor, executeLegs, executePaperLegs, getSettings, marketHealthy = () => true,
-    // Client sizing outside any strategy allocation (server: multiplier or capital ÷ base).
+    // Client sizing outside any strategy allocation (server: multiplier or capital / base).
     clientFactor = c => (Number(c.multiplier) > 0 ? Number(c.multiplier) : 1),
   } = deps;
 
   const entering  = new Set();          // assignment ids with an entry in flight
   const exiting   = new Set();          // position ids with an exit in flight
-  const subscribed = new Map();         // assignment id → Set(token)
-  const lastPrewarm = new Map();        // assignment id → ms
+  const subscribed = new Map();         // assignment id -> Set(token)
+  const lastPrewarm = new Map();        // assignment id -> ms
   const noted     = new Map();          // de-duplication of repeated warnings
   let expiryCache = { ref: null, map: new Map() };
   let chainCache  = { ref: null, map: new Map() };
 
-  // ── helpers ────────────────────────────────────────────────
+  // helpers
   const owner = a => `strategy:${a.id}`;
 
   // PAPER and LIVE share the execution engine; only the broker differs.
   const executorFor = mode => (mode === "LIVE" ? executeLegs : executePaperLegs);
-  // Global PAPER (Admin → Execution & Limits) makes every assignment paper.
+  // Global PAPER (Admin -> Execution & Limits) makes every assignment paper.
   const modeOf = a => ((getSettings() || {}).tradingMode === "LIVE" && a.mode === "LIVE" ? "LIVE" : "PAPER");
   const latencyFields = l => (l ? { queueMs: l.queueMs, ackMs: l.ackMs, fillMs: l.fillMs, totalMs: l.totalMs } : {});
 
@@ -154,7 +154,7 @@ function createRunner(deps) {
     });
   }
 
-  // ── settlement ─────────────────────────────────────────────
+  // settlement
   function settleExpired(a, s, run, p) {
     let changed = false;
     const quotes = getQuotes() || {};
@@ -170,12 +170,12 @@ function createRunner(deps) {
     return changed;
   }
 
-  // ── exits ──────────────────────────────────────────────────
+  // exits
   async function exitPositions(a, s, run, list) {
     if (!list.length) return;
     list.forEach(([p]) => exiting.add(p.id));
     try {
-      const byClient = new Map();   // "mode|client" → items
+      const byClient = new Map();   // "mode|client" -> items
       list.forEach(item => {
         const key = `${item[0].mode === "LIVE" ? "LIVE" : "PAPER"}|${item[0].client}`;
         if (!byClient.has(key)) byClient.set(key, []);
@@ -233,7 +233,7 @@ function createRunner(deps) {
     }
   }
 
-  // ── monitoring (stops, time exit, square-off, daily loss) ──
+  // monitoring (stops, time exit, square-off, daily loss)
   function monitor(a, s, run, p) {
     const spec = s.spec;
     const quotes = getQuotes() || {};
@@ -275,7 +275,7 @@ function createRunner(deps) {
         if (agg.pnl <= -limit) {
           run.haltedClients.push(clientId);
           store.saveRun(run);
-          event(a, s, "error", `Daily loss limit hit for ${clientId}: ₹${round2(agg.pnl)} ≤ −₹${round2(limit)} (${spec.dailyLossPct}% of ₹${round2(a.capital * agg.mult)}) — squaring off, no more entries today`);
+          event(a, s, "error", `Daily loss limit hit for ${clientId}: ₹${round2(agg.pnl)} <= -₹${round2(limit)} (${spec.dailyLossPct}% of ₹${round2(a.capital * agg.mult)}) — squaring off, no more entries today`);
           run.positions.filter(x => x.client === clientId && isOpen(x) && !exiting.has(x.id)).forEach(x => want(x, "DAILY_LOSS"));
         }
       }
@@ -284,7 +284,7 @@ function createRunner(deps) {
     return reasons.size ? [exitPositions(a, s, run, [...reasons.values()])] : [];
   }
 
-  // ── entries ────────────────────────────────────────────────
+  // entries
   function dueSlots(a, s, run, t, p) {
     const due = [];
     let missed = 0;
@@ -333,10 +333,9 @@ function createRunner(deps) {
       return;
     }
 
-    if (mode === "LIVE") {
-      if (settings.tradingHalted) { event(a, s, "warn", `Trading is halted by admin — ${label} entry skipped`); return; }
-      if (!marketHealthy()) { event(a, s, "warn", `Market data is not live — ${label} entry skipped`); return; }
-    }
+    if (mode === "LIVE" && settings.tradingHalted) { event(a, s, "warn", `Trading is halted by admin — ${label} entry skipped`); return; }
+    // PAPER too: an entry on old prices would not match what LIVE could have done.
+    if (!marketHealthy()) { event(a, s, "warn", `Market data is not live — ${label} entry skipped`); return; }
 
     const chain = chainFor(sym, plan.expiry, run.day);
     if (!chain.strikes.length) { event(a, s, "error", `No ${sym.underlying} options for expiry ${plan.expiry} — ${label} skipped`); return; }
@@ -372,8 +371,8 @@ function createRunner(deps) {
     }
     if (!cls.length) { event(a, s, "warn", `${label}: no eligible clients — skipped`); return; }
 
-    // Lots per client: the strategy allocation for that client (₹ ÷ strategy capital),
-    // else the client's normal sizing. 0 → this client sits this strategy out.
+    // Lots per client: the strategy allocation for that client (₹ / strategy capital),
+    // else the client's normal sizing. 0 -> this client sits this strategy out.
     const factorOf = c => {
       const alloc = a.allocations?.[c.id];
       if (alloc !== undefined && alloc !== null && a.capital > 0) return alloc / a.capital;
@@ -437,7 +436,7 @@ function createRunner(deps) {
     }
 
     event(a, s, "info", `Entered ${label} (${mode}) for ${cls.map(c => c.id).join(", ")}: ` +
-      picks.map(({ leg, pick, lots }) => `${leg.action} ${lots}L ${pick.tradingSymbol}${pick.delta != null ? ` Δ${round2(pick.delta)}` : ""} @${round2(pick.premium)}`).join(" | "));
+      picks.map(({ leg, pick, lots }) => `${leg.action} ${lots}L ${pick.tradingSymbol}${pick.delta != null ? ` delta ${round2(pick.delta)}` : ""} @${round2(pick.premium)}`).join(" | "));
   }
 
   async function enter(a, s, run, due) {
@@ -453,7 +452,7 @@ function createRunner(deps) {
     }
   }
 
-  // ── the tick ───────────────────────────────────────────────
+  // the tick
   async function tick() {
     const t = now();
     const p = ist.parts(t);
@@ -503,7 +502,7 @@ function createRunner(deps) {
     }
   }
 
-  // ── commands ───────────────────────────────────────────────
+  // commands
   function load(id) {
     const a = store.getAssignment(id);
     if (!a) throw Object.assign(new Error("Assignment not found"), { status: 404 });
@@ -604,7 +603,7 @@ function createRunner(deps) {
     }
   }
 
-  // ── status for the UI ──────────────────────────────────────
+  // status for the UI
   function nextEntry(s, run, t) {
     const today = ist.parts(t).date;
     for (let i = 0, d = today; i < 30; i++, d = ist.addDays(d, 1)) {

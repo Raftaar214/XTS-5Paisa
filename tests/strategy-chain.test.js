@@ -29,7 +29,7 @@ test("implied volatility round-trips through the price", () => {
   assert.strictEqual(greeks.impliedVol(0, 24000, 24300, 0.0008, 0.06, "CE"), null);
 });
 
-// ── synthetic NIFTY chain ──
+// synthetic NIFTY chain
 const EXPIRY = "2026-11-17";
 const NOW = ist.timeOn(EXPIRY, "09:20");
 const F = 24012, SIGMA = 0.35, R = 0.06;
@@ -93,7 +93,7 @@ test("the forward is recovered from put-call parity at the money", () => {
   close(fwd, F, 2, "forward");
 });
 
-test("delta 20 nearest_ge picks the furthest strike whose delta is still ≥ 20", () => {
+test("delta 20 nearest_ge picks the furthest strike whose delta is still >= 20", () => {
   const chain = chainLib.buildChain(makeInstruments(), "NIFTY", "NSE_FO", EXPIRY, EXPIRY);
   const quotes = makeQuotes(chain);
   const ctx = { F, T, r: R };
@@ -154,7 +154,7 @@ test("when the strike gap jumps past the tolerance, the strike with the nearest 
   const chain = chainLib.buildChain(makeInstruments(), "NIFTY", "NSE_FO", EXPIRY, EXPIRY);
   const quotes = makeQuotes(chain, 0.14);
   const ctx = { F, T, r: R };
-  // at 14% vol the deltas go 55 → 34 → 16: nothing within 20 ± 5 that is ≥ 20
+  // at 14% vol the deltas go 55 -> 34 -> 16: nothing within 20 ± 5 that is >= 20
   const pick = chainLib.selectStrike(chain, quotes, ctx, "CE",
     { rule: "delta", delta: 20, match: "nearest_ge", minPremium: 0, tolerance: 5 });
   assert.ok(pick.ok, pick.reason);

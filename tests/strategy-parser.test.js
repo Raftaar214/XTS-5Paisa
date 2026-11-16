@@ -17,7 +17,7 @@ const ist = require(BACKEND + "/strategy/ist");
 
 const fixture = name => JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", name), "utf8"));
 
-// ── IST helpers ──────────────────────────────────────────────
+// IST helpers
 test("IST parts are computed independently of the server's time zone", () => {
   // 2026-11-17 03:50 UTC = 09:20 IST
   const p = ist.parts(Date.UTC(2026, 10, 17, 3, 50, 0));
@@ -36,15 +36,15 @@ test("an epoch expiry converts to its IST calendar date", () => {
 
 test("DTE counts trading days and skips weekends", () => {
   assert.strictEqual(ist.tradingDaysBetween("2026-11-17", "2026-11-17"), 0); // expiry day
-  assert.strictEqual(ist.tradingDaysBetween("2026-11-16", "2026-11-17"), 1); // Mon → Tue
-  assert.strictEqual(ist.tradingDaysBetween("2026-11-13", "2026-11-17"), 2); // Fri → Tue
+  assert.strictEqual(ist.tradingDaysBetween("2026-11-16", "2026-11-17"), 1); // Mon -> Tue
+  assert.strictEqual(ist.tradingDaysBetween("2026-11-13", "2026-11-17"), 2); // Fri -> Tue
 });
 
 test("IST HH:MM on a date converts to the right instant", () => {
   assert.strictEqual(ist.timeOn("2026-11-17", "09:20"), Date.UTC(2026, 10, 17, 3, 50, 0));
 });
 
-// ── Parser ───────────────────────────────────────────────────
+// Parser
 test("v38: NIFTY + SENSEX, two leg groups every 10 minutes on expiry day", () => {
   const { ok, spec, errors } = parseStrategyFile(fixture("0dte-v2_v38.strategy.json"));
   assert.ok(ok, errors.join("; "));

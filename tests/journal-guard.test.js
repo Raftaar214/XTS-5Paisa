@@ -20,7 +20,7 @@ const { writeJsonAtomic, readJson } = require(BACKEND + "/fsutil");
 const journal = require(BACKEND + "/journal");
 const { createOrderGuard } = require(BACKEND + "/orderGuard");
 
-// ── atomic JSON ──
+// atomic JSON
 test("atomic writes replace the file whole and leave no temp files", () => {
   const f = path.join(dataDir, "x.json");
   writeJsonAtomic(f, { a: 1 });
@@ -30,7 +30,7 @@ test("atomic writes replace the file whole and leave no temp files", () => {
   assert.strictEqual(readJson(path.join(dataDir, "missing.json"), "fallback"), "fallback");
 });
 
-// ── journal ──
+// journal
 const T = Date.UTC(2026, 10, 17, 4, 0, 0); // 09:30 IST
 
 test("trades are appended to the IST day's file and read back", () => {
@@ -64,7 +64,7 @@ test("CSV export quotes every cell and escapes quotes", () => {
   assert.strictEqual(csv, '"a","b"\n"say ""hi""","1"\n"","2"');
 });
 
-// ── order guard ──
+// order guard
 test("orders for one client are spaced out; other clients are not blocked", async () => {
   const guard = createOrderGuard({ minGapMs: 40, getMaxPerMinute: () => 0 });
   const t0 = Date.now();

@@ -21,9 +21,7 @@ const DEFAULT_ROOT_URL = process.env.XTS_INTERACTIVE_URL || "https://xtsmum.5pai
 
 const clients = []; // shared array reference — always mutated in place, never reassigned
 
-// ─────────────────────────────────────────────────────────────
 // Persistence
-// ─────────────────────────────────────────────────────────────
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 }
@@ -49,7 +47,7 @@ function persist() {
 }
 
 function persistQuiet() {
-  try { persist(); } catch (e) { console.error("⚠️  Could not write data/clients.json:", e.message); }
+  try { persist(); } catch (e) { console.error("Warning: Could not write data/clients.json:", e.message); }
 }
 
 function replaceAll(list) {
@@ -61,11 +59,9 @@ function runtimeShape(c) {
   return { ...c, isLogged: false, isConnected: false, token: null, userID: null };
 }
 
-// ─────────────────────────────────────────────────────────────
 // First-run bootstrap from legacy .env (CLI1_*, CLI2_*, ... MARKET_*)
 // First client found becomes the PARENT (matches the existing .env you had:
 // CLI1 = ABHISHEK KHANDAL, plus MARKET_APP_KEY/MARKET_SECRET_KEY).
-// ─────────────────────────────────────────────────────────────
 function bootstrapFromEnv() {
   const list = [];
   for (let i = 1; i <= 10; i++) {
@@ -107,27 +103,25 @@ function load() {
       const raw = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
       if (Array.isArray(raw) && raw.length) {
         replaceAll(raw.map(runtimeShape));
-        console.log(`✅ Loaded ${clients.length} client(s) from data/clients.json`);
+        console.log(`Loaded ${clients.length} client(s) from data/clients.json`);
         return;
       }
     } catch (err) {
-      console.error("❌ Failed to read data/clients.json — falling back to .env bootstrap:", err.message);
+      console.error("Error: Failed to read data/clients.json — falling back to .env bootstrap:", err.message);
     }
   }
   replaceAll(bootstrapFromEnv().map(runtimeShape));
   persistQuiet();
-  console.log(`✅ Bootstrapped ${clients.length} client(s) from .env → data/clients.json`);
+  console.log(`Bootstrapped ${clients.length} client(s) from .env into data/clients.json`);
 }
 
 load();
 
 async function initClients() {
-  console.log(`✅ ${clients.length} client(s) configured: ${clients.map(c => `${c.id}(${c.role}${c.role === "CHILD" ? ` ${c.multiplier}x` : ""})`).join(", ")}`);
+  console.log(`${clients.length} client(s) configured: ${clients.map(c => `${c.id}(${c.role}${c.role === "CHILD" ? ` ${c.multiplier}x` : ""})`).join(", ")}`);
 }
 
-// ─────────────────────────────────────────────────────────────
 // Read helpers
-// ─────────────────────────────────────────────────────────────
 function getParent() { return clients.find(c => c.role === "PARENT") || null; }
 function hasParent()  { return !!getParent(); }
 
@@ -176,9 +170,7 @@ function isVisibleTo(client, username) {
   return !client.assignedTo || client.assignedTo === username;
 }
 
-// ─────────────────────────────────────────────────────────────
 // CRUD (used by the User Management panel)
-// ─────────────────────────────────────────────────────────────
 // Account capital in ₹ (used by capital-based sizing). Empty = not set.
 function capitalOf(v) {
   if (v === null || v === undefined || v === "") return null;

@@ -2,7 +2,7 @@
 // (GET /interactive/user/balance — read-only).
 //
 // Layout per the XTS Interactive API docs:
-//   result.BalanceList[] → { limitHeader: "ALL|ALL|ALL",
+//   result.BalanceList[] -> { limitHeader: "ALL|ALL|ALL",
 //     limitObject: { RMSSubLimits: { cashAvailable, collateral, marginUtilized,
 //                                    netMarginAvailable, MTM, … }, … } }
 // Values arrive as strings. If the broker answers in a different shape the

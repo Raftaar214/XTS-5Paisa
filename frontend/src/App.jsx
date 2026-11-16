@@ -27,9 +27,7 @@ const CSV_COLUMNS = {
 const CSV_NAMES = { orders: "order-book", trades: "trade-book", positions: "positions", algo: "algo-positions", algoorders: "algo-orders" };
 import StrategyPanel from "./StrategyPanel.jsx";
 
-// ─────────────────────────────────────────────────────────────
 // CONFIG
-// ─────────────────────────────────────────────────────────────
 const API   = API_BASE;
 const SIDES = ["Buy", "Sell"];
 
@@ -38,6 +36,12 @@ const DEFAULT_EXEC_CONFIG = {
   tradingMode: "PAPER", tradingHalted: false, haltReason: "",
   engine: { bufferPct: 0.5, fillTimeout: 4, maxRetries: 1 },
   limits: { maxLegs: 8 },
+};
+
+// The admin's halt reason, unless it only repeats "halted by admin".
+const haltNote = reason => {
+  const x = String(reason || "").trim().replace(/[.\s]+$/, "");
+  return x && !/^halted( by (the )?admin)?$/i.test(x) ? x : "";
 };
 
 const authHeaders = () => {
@@ -60,9 +64,7 @@ const isFutureOrToday = (dateStr) => {
 
     return expiry.getTime() >= today.getTime();
 };
-// ─────────────────────────────────────────────────────────────
 // INSTRUMENT PROCESSING
-// ─────────────────────────────────────────────────────────────
 // Equity segments have no expiry/strike; their symbol is the trading symbol.
 const EQUITY_SEGMENTS = new Set(["NSE_EQ", "BSE_EQ"]);
 const noStrike = type => type === "FO" || type === "EQ";
@@ -212,9 +214,7 @@ const sym = data[seg].symbols.includes(tSym)
     side: "Buy",
   };
 };
-// ═══════════════════════════════════════════════════════════════
 // PORTFOLIO SECTION
-// ═══════════════════════════════════════════════════════════════
 const PortfolioSection = ({
   marketData, loading, quoteMap,
   onLoginAll, onLogoutAll, onConnectAll, onDisconnectAll, onUpload, onDownload,
@@ -288,16 +288,11 @@ const PortfolioSection = ({
 
         try {
 
-            // ============================
-            // 1. Subscribe NEW tokens first
-            // ============================
-            // ============================
 // 1. Unsubscribe OLD tokens
-// ============================
 
 if (toUnsubscribe.length) {
 
-    log(`📴 Unsubscribe token(s): ${toUnsubscribe.join(", ")}`);
+    log(`Unsubscribe token(s): ${toUnsubscribe.join(", ")}`);
 
     const res = await fetch(`${API}/api/unsubscribe`, {
         method: "POST",
@@ -313,9 +308,7 @@ if (toUnsubscribe.length) {
 }
 
 
-// ============================
 // 2. Subscribe NEW tokens
-// ============================
 
 if (toSubscribe.length) {
 
@@ -327,7 +320,7 @@ if (toSubscribe.length) {
         return leg?.segment || "NSE_FO";
     });
 
-    log(`📡 Subscribe token(s): ${toSubscribe.join(", ")}`);
+    log(`Subscribe token(s): ${toSubscribe.join(", ")}`);
 
     const res = await fetch(`${API}/api/subscribe`, {
         method: "POST",
@@ -368,7 +361,7 @@ if (toSubscribe.length) {
 
   const handleLegChange = (idx, field, value) => {
     if (!marketData) return;
-    log(`L${idx + 1} ${field} → ${value}`);
+    log(`L${idx + 1} ${field}: ${value}`);
     setLegs(prev => {
       const next = [...prev];
       const leg  = next[idx];
@@ -462,7 +455,7 @@ if (toSubscribe.length) {
 
       {halted && (
         <div className="px-4 py-1.5 shrink-0 flex items-center gap-2 bg-red-500/15 border-b border-red-500/40 text-red-300 text-[11px] font-semibold">
-          <OctagonX size={13}/> Trading halted by admin{execConfig.haltReason ? ` — ${execConfig.haltReason.replace(/[.\s]+$/, "")}` : ""}. Execute is disabled.
+          <OctagonX size={13}/> Trading is halted by the admin{haltNote(execConfig.haltReason) ? ` (reason: ${haltNote(execConfig.haltReason)})` : ""}. The Execute button is off.
         </div>
       )}
 
@@ -472,7 +465,7 @@ if (toSubscribe.length) {
         {Array.from({ length: maxLegs }, (_, i) => i + 1).map(n=>(
           <label key={n} className="flex items-center gap-2 cursor-pointer select-none">
             <input type="radio" name="numLegs" value={n} checked={numLegs===n}
-              onChange={()=>{ log(`Legs: ${numLegs} → ${n}`); setNumLegs(n); }} className="w-[17px] h-[17px] accent-blue-500 cursor-pointer"/>
+              onChange={()=>{ log(`Legs: ${numLegs} to ${n}`); setNumLegs(n); }} className="w-[17px] h-[17px] accent-blue-500 cursor-pointer"/>
             <span className="text-white text-[14px]">{n}</span>
           </label>
         ))}
@@ -567,7 +560,7 @@ if (toSubscribe.length) {
 
                   {/* Token */}
                   <div className="h-8 flex items-center gap-1 overflow-hidden" title={leg.exchange_token}>
-                    <span className={`text-[10px] leading-none shrink-0 ${tokOk?"text-emerald-500":"text-red-500"}`}>●</span>
+                    <span aria-hidden="true" className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${tokOk?"bg-emerald-500":"bg-red-500"}`}/>
                     <span className={`font-mono text-[11px] truncate ${tokOk?"text-emerald-400":"text-red-400"}`}>
                       {tokOk?leg.exchange_token:"N/A"}
                     </span>
@@ -613,9 +606,7 @@ if (toSubscribe.length) {
   );
 };
 
-// ═══════════════════════════════════════════════════════════════
 // CLIENT CARD
-// ═══════════════════════════════════════════════════════════════
 const ClientCard = ({ client, quoteMap, onToggleLogin, onToggleConnect }) => {
   const [viewMode, setViewMode] = useState("positions");
   const [rows,     setRows]     = useState([]);
@@ -699,7 +690,7 @@ const ClientCard = ({ client, quoteMap, onToggleLogin, onToggleConnect }) => {
           </td>
           <td className="px-2 py-1">
             <div className="text-white">{p.tradingSymbol}</div>
-            <div className="text-[8px] text-gray-500 font-mono">{p.token}{p.delta!=null?` · Δ${p.delta}`:""}</div>
+            <div className="text-[8px] text-gray-500 font-mono">{p.token}{p.delta!=null?` · delta ${p.delta}`:""}</div>
           </td>
           <td className={`px-2 py-1 font-semibold ${p.side==="BUY"?"text-blue-400":"text-red-400"}`}>{p.side}</td>
           <td className="px-2 py-1">{p.qty}</td>
@@ -926,9 +917,7 @@ const mtm =
   );
 };
 
-// ═══════════════════════════════════════════════════════════════
 // MAIN APP
-// ═══════════════════════════════════════════════════════════════
 export default function App() {
   const [marketData,      setMarketData]      = useState(null);
   const [instrLoading,    setInstrLoading]    = useState(true);
@@ -990,7 +979,7 @@ export default function App() {
       .then(d => {
         if (!d?.rows?.length) return;
         const restored = d.rows.slice(-300).map(e => `[${e.time}] ${e.source && e.source !== "UI" ? `[${e.source}] ` : ""}${e.message}`);
-        setGlobalLogs(p => [...restored, `── today's saved activity above · this session below ──`, ...p]);
+        setGlobalLogs(p => [...restored, "Today's saved activity above, this session below", ...p]);
       })
       .catch(() => {});
   }, []);
@@ -1000,11 +989,11 @@ export default function App() {
       await downloadFile(`${API}/api/journal/events?format=csv&date=${todayIst()}`, `activity-log-${todayIst()}.csv`, authHeaders());
       log("Activity log downloaded.");
     } catch (e) {
-      log(`❌ Activity log download failed: ${e.message}`);
+      log(`Error: Activity log download failed: ${e.message}`);
     }
   };
 
-  // ── WebSocket for Bid/Ask quotes ──────────────────────────
+  // WebSocket for Bid/Ask quotes
   useEffect(() => {
     let mounted     = true;
     let reconnTimer = null;
@@ -1084,7 +1073,7 @@ export default function App() {
     };
   }, [log]);
 
-  // ── Load instruments (backend downloads them from Upstox) ─
+  // Load instruments (backend downloads them from Upstox)
   const loadInstruments = useCallback(async () => {
     const r = await fetch(`${API}/api/instruments`, { headers: authHeaders() });
     const raw = await r.json();
@@ -1108,16 +1097,16 @@ export default function App() {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
       const n = await loadInstruments();
-      if (d.lastError) log(`⚠️ Instruments: download failed (${d.lastError}) — still using the copy from ${new Date(d.fetchedAt).toLocaleString()}`);
-      else log(`✅ Instruments refreshed: ${d.count.toLocaleString()} total, ${n.toLocaleString()} in allowed segments`);
+      if (d.lastError) log(`Warning: Instruments: download failed (${d.lastError}) — still using the copy from ${new Date(d.fetchedAt).toLocaleString()}`);
+      else log(`Instruments refreshed: ${d.count.toLocaleString()} total, ${n.toLocaleString()} in allowed segments`);
     } catch (e) {
-      log(`❌ Instrument refresh failed: ${e.message}`);
+      log(`Error: Instrument refresh failed: ${e.message}`);
     } finally {
       setIsRefreshingInstruments(false);
     }
   };
 
-  // ── Execution settings set by the admin (kill switch, engine, limits) ──
+  // Execution settings set by the admin (kill switch, engine, limits)
   const fetchExecConfig = useCallback(async () => {
     try {
       const r = await fetch(`${API}/api/execution/config`, { headers: authHeaders() });
@@ -1126,7 +1115,7 @@ export default function App() {
   }, []);
   useEffect(() => { fetchExecConfig(); const id = setInterval(fetchExecConfig, 5000); return () => clearInterval(id); }, [fetchExecConfig]);
 
-  // ── Poll client state ─────────────────────────────────────
+  // Poll client state
   const fetchClients = useCallback(async () => {
   try {
     const r = await fetch(`${API}/api/clients`, {
@@ -1147,14 +1136,14 @@ export default function App() {
 }, []);
   useEffect(() => { fetchClients(); const id = setInterval(fetchClients, 4000); return ()=>clearInterval(id); }, [fetchClients]);
 
-  // ── API helper ────────────────────────────────────────────
+  // API helper
   // Trade book CSV from the server journal (manual + strategy fills; survives restarts).
   const downloadTradeBook = async () => {
     try {
       await downloadFile(`${API}/api/journal/trades?format=csv&date=${todayIst()}`, `trade-book-${todayIst()}.csv`, authHeaders());
       log("Trade book downloaded.");
     } catch (e) {
-      log(`❌ Trade book download failed: ${e.message}`);
+      log(`Error: Trade book download failed: ${e.message}`);
     }
   };
 
@@ -1215,7 +1204,7 @@ export default function App() {
     await fetchClients(); setIsConnectingAll(false);
   };
 
-  // ── Execute portfolio ─────────────────────────────────────
+  // Execute portfolio
   // Injects current bid/ask from quoteMap into each leg before sending
   const executePortfolio = async (rawLegs) => {
     // PAPER needs no broker session; LIVE needs each client logged in and connected.
@@ -1229,7 +1218,7 @@ export default function App() {
       return { ...l, bid: q.bid, ask: q.ask, ltp: q.ltp };
     });
 
-    if (execConfig.tradingHalted) { log(`ERROR: Trading is halted by admin${execConfig.haltReason ? ` — ${execConfig.haltReason}` : ""}`); return; }
+    if (execConfig.tradingHalted) { log(`ERROR: Trading is halted by admin${haltNote(execConfig.haltReason) ? ` — ${haltNote(execConfig.haltReason)}` : ""}`); return; }
 
     const eng = execConfig.engine;
     setIsExecuting(true);
@@ -1239,7 +1228,7 @@ export default function App() {
       const results = await callApi("/api/order", { legs });
       if (!Array.isArray(results)) {
         // Refused before any order was sent (halted, risk limit, already running…)
-        log(`❌ Execution refused: ${results?.error || "unknown error"}`);
+        log(`Error: Execution refused: ${results?.error || "unknown error"}`);
         fetchExecConfig();
         setIsExecuting(false);
         return;
@@ -1249,39 +1238,39 @@ export default function App() {
 
 
       arr.forEach(r => {
-        // ── Summary line ──────────────────────────────────────
+        // Summary line
         if (r.status === "FILLED") {
           const L = r.latency || {};
-          log(`✅ ${r.clientName||r.client} | ${labelOf(r)} | FILLED ${r.filledQty}/${r.requestedQty} @ ₹${r.avgPrice?.toFixed(2)||"—"} | ID: ${r.orderId}` +
-              (L.totalMs != null ? ` | ⏱ ${L.totalMs} ms (queue ${L.queueMs ?? "—"}, ack ${L.ackMs ?? "—"}, fill ${L.fillMs ?? "—"})` : ""));
+          log(`${r.clientName||r.client} | ${labelOf(r)} | FILLED ${r.filledQty}/${r.requestedQty} @ ₹${r.avgPrice?.toFixed(2)||"—"} | ID: ${r.orderId}` +
+              (L.totalMs != null ? ` | ${L.totalMs} ms (queue ${L.queueMs ?? "—"}, ack ${L.ackMs ?? "—"}, fill ${L.fillMs ?? "—"})` : ""));
         } else if (r.status === "PARTIAL") {
-          log(`⚠️ ${r.clientName||r.client} | ${labelOf(r)} | PARTIAL — ${r.filledQty}/${r.requestedQty} filled, ${r.remainingQty} unfilled | ${r.error||""}`);
+          log(`Warning: ${r.clientName||r.client} | ${labelOf(r)} | PARTIAL — ${r.filledQty}/${r.requestedQty} filled, ${r.remainingQty} unfilled | ${r.error||""}`);
         } else if (r.status === "MANUAL_CHECK") {
 
     log(
-        `🚨 ${r.clientName || r.client} | ${labelOf(r)} | MANUAL CHECK REQUIRED — ${r.error}`
+        `${r.clientName || r.client} | ${labelOf(r)} | MANUAL CHECK REQUIRED — ${r.error}`
     );
 
 } else if (r.status === "FAILED") {
-          log(`❌ ${r.clientName||r.client} | ${labelOf(r)} | FAILED — ${r.error||"unknown error"}`);
+          log(`Error: ${r.clientName||r.client} | ${labelOf(r)} | FAILED — ${r.error||"unknown error"}`);
         } else {
-          log(`❓ ${r.clientName||r.client} | ${labelOf(r)} | ${r.status}`);
+          log(`${r.clientName||r.client} | ${labelOf(r)} | ${r.status}`);
         }
 
-        // ── Per-attempt breakdown ──────────────────────────────
+        // Per-attempt breakdown
         (r.attempts||[]).forEach(a => {
           if (a.error) {
             // Rejection or no feed — show error first like Python
-            log(`   Attempt ${a.attempt}: ❌ REJECTED — ${a.error}`);
+            log(`   Attempt ${a.attempt}: REJECTED — ${a.error}`);
           } else if (a.status === "FILLED") {
-            log(`   Attempt ${a.attempt}: ✅ FILLED ${a.filledQty} @ ₹${a.avgPrice?.toFixed(2)} | limit=₹${a.limitPrice?.toFixed(2)}`);
+            log(`   Attempt ${a.attempt}: FILLED ${a.filledQty} @ ₹${a.avgPrice?.toFixed(2)} | limit=₹${a.limitPrice?.toFixed(2)}`);
           } else if (a.cancelled) {
             // Partial fill + cancel + retry — the core MLO case
-            log(`   Attempt ${a.attempt}: ⏱ PARTIAL ${a.filledQty}/${a.qty} filled | cancelled remaining=${a.remaining} | retrying…`);
+            log(`   Attempt ${a.attempt}: PARTIAL ${a.filledQty}/${a.qty} filled | cancelled remaining=${a.remaining} | retrying…`);
           } else if ((a.filledQty||0) > 0) {
-            log(`   Attempt ${a.attempt}: ⚠️ PARTIAL ${a.filledQty}/${a.qty} @ ₹${a.avgPrice?.toFixed(2)}`);
+            log(`   Attempt ${a.attempt}: PARTIAL ${a.filledQty}/${a.qty} @ ₹${a.avgPrice?.toFixed(2)}`);
           } else {
-            log(`   Attempt ${a.attempt}: ⏳ PENDING | limit=₹${a.limitPrice?.toFixed(2)} bid=${a.bid} ask=${a.ask}`);
+            log(`   Attempt ${a.attempt}: PENDING | limit=₹${a.limitPrice?.toFixed(2)} bid=${a.bid} ask=${a.ask}`);
           }
         });
       });
@@ -1407,9 +1396,10 @@ export default function App() {
               <div className="flex-1 overflow-y-auto p-1.5 bg-[#0d1117] font-mono text-[9px] leading-relaxed custom-scrollbar">
                 {globalLogs.map((line,i)=>{
                   const l = line.toLowerCase();
-                  const c = l.includes("❌")||l.includes("error")||l.includes("reject")?"text-red-400"
-                    : l.includes("✅")||l.includes("login")||l.includes("connect")?"text-emerald-400"
-                    : l.includes("🔥")||l.includes("⚡")?"text-amber-400" : "text-gray-400";
+                  // Colour by meaning (words, not symbols): errors red, successes green, executions / warnings amber.
+                  const c = /error|reject|fail/.test(l) ? "text-red-400"
+                    : /filled|login|logged in|connect/.test(l) ? "text-emerald-400"
+                    : /execute|warning|partial|pending/.test(l) ? "text-amber-400" : "text-gray-400";
                   return <div key={i} className={c}>{line}</div>;
                 })}
                 <div ref={logEndRef}/>

@@ -21,11 +21,9 @@ const ips = Object.values(os.networkInterfaces())
   .filter(i => i && i.family === "IPv4" && !i.internal)
   .map(i => i.address);
 
-const line = "=".repeat(64);
 console.log("");
-console.log(line);
 console.log("  XTS Trading Desk");
-console.log(line);
+console.log("");
 console.log("  Open the dashboard from any computer on the network:");
 if (ips.length) ips.forEach(ip => console.log(`     http://${ip}:${port}`));
 else console.log("     (no network address found — check the network connection)");
@@ -52,5 +50,5 @@ if (!env.ADMIN_USERNAME || !env.ADMIN_PASSWORD) {
 if (!env.AUTH_SECRET) {
   console.log("  NOTE: AUTH_SECRET is not set — everyone must log in again after each restart.");
 }
-console.log(line);
+console.log("");
 console.log("");

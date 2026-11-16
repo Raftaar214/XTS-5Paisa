@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import { Loader, RefreshCw } from "lucide-react";
 import { adminFetch } from "./authFetch.js";
 
-// Admin console → Monitor → Client margins: utilized vs available per client,
+// Admin console -> Monitor -> Client margins: utilized vs available per client,
 // read from the broker's balance endpoint (read-only, cached 30 s server-side).
 
 const inr = v => (v == null ? "—" : `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`);

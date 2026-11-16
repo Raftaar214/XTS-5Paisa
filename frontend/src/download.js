@@ -18,7 +18,7 @@ export async function downloadFile(url, filename, headers = {}) {
   setTimeout(() => URL.revokeObjectURL(href), 1000);
 }
 
-// Rows → CSV text. `columns`: [[key, label], …] or [key, …]; when omitted,
+// Rows -> CSV text. `columns`: [[key, label], …] or [key, …]; when omitted,
 // every key seen in any row (first-seen order). Every cell is quoted.
 export function rowsToCsv(rows, columns) {
   const list = Array.isArray(rows) ? rows : [];

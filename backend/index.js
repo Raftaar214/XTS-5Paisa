@@ -1,32 +1,31 @@
 /**
  * index.js — Marketable Limit Order (MLO) Execution Engine
- * =========================================================
  * Node.js port of execution.py (MarketableLimitEngine class)
  *
- * Exact Python → JS mapping:
- *   MarketableLimitEngine.execute()  → executeOneLeg()
- *   _marketable_limit_price()        → marketableLimitPrice()
- *   _query_status()                  → queryOrderStatus()
- *   XTSSession.place_order()         → placeOrder()    [xtsApi.js]
- *   XTSSession.cancel_order()        → cancelOrder()   [xtsApi.js]
- *   XTSSession.get_order_history()   → getOrderHistory() [xtsApi.js]
- *   time.sleep()                     → await sleep()
- *   threading.Thread                 → Promise.all()
+ * Exact Python -> JS mapping:
+ *   MarketableLimitEngine.execute()  -> executeOneLeg()
+ *   _marketable_limit_price()        -> marketableLimitPrice()
+ *   _query_status()                  -> queryOrderStatus()
+ *   XTSSession.place_order()         -> placeOrder()    [xtsApi.js]
+ *   XTSSession.cancel_order()        -> cancelOrder()   [xtsApi.js]
+ *   XTSSession.get_order_history()   -> getOrderHistory() [xtsApi.js]
+ *   time.sleep()                     -> await sleep()
+ *   threading.Thread                 -> Promise.all()
  *
  * Flow per leg per client:
  *   attempt 1..maxRetries+1:
  *     1. Fresh bid/ask/ltp from live feed
  *     2. Marketable LIMIT price = ask*(1+buf%) BUY | bid*(1-buf%) SELL
  *     3. Risk limits (max qty / max order value) checked BEFORE placing
- *     4. Place LIMIT order → get AppOrderID
+ *     4. Place LIMIT order -> get AppOrderID
  *     5. Poll order history every pollInterval until filled / dead / fillTimeout
- *     6. Timeout → cancel, wait for the broker to confirm, then book the
+ *     6. Timeout -> cancel, wait for the broker to confirm, then book the
  *        order's FINAL fill (fills that land while the cancel is in flight
  *        are counted) and retry only what is genuinely still unfilled
- *     7. Broker rejection (HTTP response) → retry; placement error with NO
- *        response (timeout / network) → stop, MANUAL_CHECK (the order may
+ *     7. Broker rejection (HTTP response) -> retry; placement error with NO
+ *        response (timeout / network) -> stop, MANUAL_CHECK (the order may
  *        exist at the broker, so a retry could double the position)
- *   Exhausted → PARTIAL (some filled) or FAILED (0 filled)
+ *   Exhausted -> PARTIAL (some filled) or FAILED (0 filled)
  *
  * Parent / Child multiplier:
  *   Every client (parent or child) fans out from the SAME leg spec.
@@ -55,9 +54,7 @@ function getLiveApi() {
 }
 const liveQuotes = () => require("./Marketsocket").getLivePrices();
 
-// ─────────────────────────────────────────────────────────────
 // Strategy presets  (mirrors OrderConfig._DEFAULTS in Python)
-// ─────────────────────────────────────────────────────────────
 const STRATEGY_PRESETS = {
   BFY:    { bufferPct: 0.50, fillTimeout: 4, maxRetries: 1 },
   LINEAR: { bufferPct: 0.50, fillTimeout: 4, maxRetries: 1 },
@@ -84,15 +81,13 @@ const DEFAULT_TICK = 0.05;
 const FILLED_STATES = ["FILLED", "TRADED", "COMPLETE", "COMPLETED"];
 const DEAD_STATES   = ["CANCELLED", "CANCELED", "EXPIRED", "REJECTED"];
 
-// ─────────────────────────────────────────────────────────────
 // Helpers
-// ─────────────────────────────────────────────────────────────
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 /**
  * Round to nearest tick (mirrors _round_to_tick in Python).
- * BUY  → CEIL  so we never undershoot the ask.
- * SELL → FLOOR so we never overshoot the bid.
+ * BUY  -> CEIL  so we never undershoot the ask.
+ * SELL -> FLOOR so we never overshoot the bid.
  */
 function roundToTick(price, direction = "CEIL", tick = 0.05) {
   if (!price || price <= 0) return tick;
@@ -105,8 +100,8 @@ function roundToTick(price, direction = "CEIL", tick = 0.05) {
 
 /**
  * Marketable limit price  (mirrors _marketable_limit_price in Python).
- * BUY  → ask*(1+buf%)  rounded CEIL  → hits best ask instantly
- * SELL → bid*(1-buf%)  rounded FLOOR → hits best bid instantly
+ * BUY  -> ask*(1+buf%)  rounded CEIL  -> hits best ask instantly
+ * SELL -> bid*(1-buf%)  rounded FLOOR -> hits best bid instantly
  * Falls back to ltp when bid/ask is zero.
  */
 function marketableLimitPrice(side, bid, ask, ltp, bufferPct, tick) {
@@ -158,9 +153,7 @@ function pushedStatus(d) {
   return toStatus(d);
 }
 
-// ─────────────────────────────────────────────────────────────
 // Query single order status  (mirrors _query_status in Python)
-// ─────────────────────────────────────────────────────────────
 // Uses the per-order history endpoint (one small response for this order)
 // instead of downloading the whole order book on every poll. Falls back to
 // the order book only if history returns nothing for this AppOrderID.
@@ -188,11 +181,9 @@ async function queryOrderStatus(api, client, appOrderId) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────
 // executeOneLeg  —  single-leg MLO engine
 // Port of MarketableLimitEngine.execute() from Python, with fill
 // accounting that books each order's final fill exactly once.
-// ─────────────────────────────────────────────────────────────
 async function executeOneLeg(client, leg, cfg, api) {
   const pollMs          = Number(cfg.pollInterval  ?? 0.5) * 1000;
   const cancelTimeoutMs = Number(cfg.cancelTimeout ?? 5)   * 1000;
@@ -206,7 +197,7 @@ async function executeOneLeg(client, leg, cfg, api) {
   // Child accounts scale every order by their configured Multiplier ×
   // (e.g. a child funded at 2x the parent's capital gets 2x the qty).
   // Parent is always 1x. Falls back to 1x if unset/invalid.
-  // Sizing factor for this client (Multiplier ×, or capital ÷ base capital —
+  // Sizing factor for this client (Multiplier ×, or capital / base capital —
   // worked out by the caller). Unset means 1x; 0 means "too small".
   const mult = client.multiplier === undefined || client.multiplier === null || client.multiplier === ""
     ? 1 : Math.max(0, Number(client.multiplier) || 0);
@@ -228,9 +219,9 @@ async function executeOneLeg(client, leg, cfg, api) {
   const productType = cfg.products?.[segKey] || cfg.products?.default || "NRML";
   const label = `${leg.symbol} ${leg.type} ${leg.strike && leg.strike !== "N/A" ? leg.strike : "FUT"}`;
   const startTime = Date.now();
-  // Latency, all in ms: queue = execute request → first order sent; ack =
-  // order sent → broker accepted; fill = accepted → fill seen; total =
-  // execute request → final fill (or end). cfg.startedAt = request arrival.
+  // Latency, all in ms: queue = execute request -> first order sent; ack =
+  // order sent -> broker accepted; fill = accepted -> fill seen; total =
+  // execute request -> final fill (or end). cfg.startedAt = request arrival.
   const t0 = Number(cfg.startedAt) > 0 ? Number(cfg.startedAt) : startTime;
   let firstPlaceAt = null, firstAckMs = null, fillAckAt = null, lastFillAt = null;
   const quotesNow = () => (cfg.getQuotes ? cfg.getQuotes() : liveQuotes()) || {};
@@ -298,7 +289,7 @@ async function executeOneLeg(client, leg, cfg, api) {
   };
 
   let totalFilled = 0;   // across all attempts
-  let filledValue = 0;   // Σ fill × price, for a true average price
+  let filledValue = 0;   // sum fill × price, for a true average price
   let remaining   = qty;
   let lastOrderId = null;
 
@@ -483,7 +474,7 @@ async function executeOneLeg(client, leg, cfg, api) {
       return finish(totalFilled > 0 ? "PARTIAL" : "FAILED", `Order Rejected${rejectReason ? `: ${rejectReason}` : ""}`);
     }
 
-    // Step 6 — still working after the timeout → cancel, then wait for the
+    // Step 6 — still working after the timeout -> cancel, then wait for the
     // broker to confirm, picking up any fills that land meanwhile.
     if (!orderDone()) {
       console.log(
@@ -542,7 +533,7 @@ async function executeOneLeg(client, leg, cfg, api) {
     if (remaining <= 0) {
       attemptLog.status = "FILLED";
       result.attempts.push(attemptLog);
-      console.log(`[MLO] ${client.id} | ✅ FILLED ${label} total=${totalFilled} AppOrderID=${appOrderId}`);
+      console.log(`[MLO] ${client.id} | FILLED ${label} total=${totalFilled} AppOrderID=${appOrderId}`);
       return finish("FILLED");
     }
 
@@ -555,7 +546,7 @@ async function executeOneLeg(client, leg, cfg, api) {
     await sleep(retryDelayMs);
   }
 
-  // ── Exhausted all retries
+  // Exhausted all retries
   const status = totalFilled > 0 ? "PARTIAL" : "FAILED";
   console.log(`[MLO] ${client.id} | ${label} | Done | filled=${totalFilled}/${qty} status=${status}`);
   return finish(
@@ -566,11 +557,9 @@ async function executeOneLeg(client, leg, cfg, api) {
   );
 }
 
-// ─────────────────────────────────────────────────────────────
 // executeOrderMulti  —  all legs × all clients, fully concurrent
 // Fans out to EVERY active client — parent AND children — each one
 // scaled by its own multiplier inside executeOneLeg() above.
-// ─────────────────────────────────────────────────────────────
 async function executeOrderMulti(legs, activeClients, cfg = DEFAULT_CFG, api = getLiveApi()) {
   const merged = { ...DEFAULT_CFG, ...cfg, limits: { ...(cfg.limits || {}) } };
   const allResults = [];

@@ -22,7 +22,7 @@ const RUNS_DIR         = path.join(DATA_DIR, "strategy-runs");
 const fail = (status, message, extra = {}) => Object.assign(new Error(message), { status, ...extra });
 const newId = prefix => `${prefix}_${crypto.randomBytes(5).toString("hex")}`;
 
-// ── Strategies ───────────────────────────────────────────────
+// Strategies
 let strategies = [];
 
 function loadStrategies() {
@@ -70,7 +70,7 @@ function removeStrategy(id) {
   return s;
 }
 
-// ── Assignments ──────────────────────────────────────────────
+// Assignments
 let assignments = [];
 
 function loadAssignments() {
@@ -93,7 +93,7 @@ function normalizeAssignment(input, existing = {}) {
   if (input.enabled    !== undefined) a.enabled    = Boolean(input.enabled);
   if (input.note       !== undefined) a.note       = String(input.note).slice(0, 200);
   // Capital allocated to this strategy per client (₹). Lots for a client =
-  // strategy lots × allocation ÷ the assignment's capital. Unset → the
+  // strategy lots × allocation / the assignment's capital. Unset -> the
   // client's normal sizing.
   if (input.allocations !== undefined) {
     const out = {};
@@ -161,7 +161,7 @@ function removeAssignment(id) {
   return a;
 }
 
-// ── Run state ────────────────────────────────────────────────
+// Run state
 const runs = new Map();
 
 function emptyRun(id) {

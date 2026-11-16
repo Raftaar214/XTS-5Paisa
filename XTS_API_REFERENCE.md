@@ -327,9 +327,9 @@ Authorization: Bearer signed-admin-token
 | `tradingMode` | `PAPER` (default — every order simulated on the live feed, nothing reaches the broker) or `LIVE` |
 | `allowedSegments` | any of `NSE_FO`, `BSE_FO`, `MCX_FO`, `NSE_EQ`, `BSE_EQ`, `NCD_FO`, `BCD_FO` (default the three F&O segments). `GET` lists them under `segments`. |
 | `products` | product type per segment: `NRML`, `MIS` or `CNC` (`GET` lists them under `productTypes`); `default` covers segments not named |
-| `sizing.mode` | `multiplier` (each client's multiplier) or `capital` (client capital ÷ `baseCapital`) |
+| `sizing.mode` | `multiplier` (each client's multiplier) or `capital` (client capital / `baseCapital`) |
 | `sizing.rounding` | `floor` (default — never more than the ratio) or `round` |
-| `engine.orderGapMs` | minimum gap between two orders of one client, 50–2000 ms (default 110; `ORDER_MIN_GAP_MS` overrides) |
+| `engine.orderGapMs` | minimum gap between two orders of one client, 50-2000 ms (default 110; `ORDER_MIN_GAP_MS` overrides) |
 
 Values outside the allowed ranges (returned by `GET` under `ranges`) are rejected with `400`. A limit of `0` means no limit. Settings are saved to `backend/data/settings.json`. A new install starts with `tradingMode: "PAPER"` and `tradingHalted: true`.
 
@@ -383,7 +383,7 @@ POST /api/admin/tradebooks/snapshot
 Authorization: Bearer signed-admin-token
 ```
 
-`/margins` reads each logged-in client's broker balance (`/interactive/user/balance` → `RMSSubLimits`) and returns available, utilized and related figures; clients that are not logged in show why. Trade books are the broker's own trade book per client, saved per day; `snapshot` saves today's now.
+`/margins` reads each logged-in client's broker balance (`/interactive/user/balance` -> `RMSSubLimits`) and returns available, utilized and related figures; clients that are not logged in show why. Trade books are the broker's own trade book per client, saved per day; `snapshot` saves today's now.
 
 ### Other Admin Actions
 
@@ -572,7 +572,7 @@ Content-Type: application/json
 ```
 
 ```json
-{ "entries": [ { "ts": 1794587155676, "message": "L2 segment → NSE_EQ" } ] }
+{ "entries": [ { "ts": 1794587155676, "message": "L2 segment -> NSE_EQ" } ] }
 ```
 
 Saves Global Market Log lines (at most 500 per request, 1000 characters each) to the day's event journal with `source: "UI"`; the level (`info` / `warn` / `error`) is taken from the text. The dashboard queues lines in `localStorage` and sends them every second, so lines written offline arrive later. Response: `{ "saved": 1 }`.
@@ -620,9 +620,9 @@ Execution behavior:
 
 - Orders are sent to every active client.
 - **LIVE** (`tradingMode: "LIVE"`): active client means enabled, logged in, and connected. **PAPER** (default): every enabled client, through the simulated broker (`PAPER-YYYYMMDD-XXXXXX` order IDs, fills against the live bid/ask) — nothing reaches 5paisa.
-- Each client's lots = `lots × factor`, in whole lots (rounded down by default). The factor is the client's multiplier (`sizing.mode: "multiplier"`) or `capital ÷ baseCapital` (`"capital"`). A client that rounds to 0 lots gets `FAILED` with "rounds to 0 lots"; the others still trade.
+- Each client's lots = `lots × factor`, in whole lots (rounded down by default). The factor is the client's multiplier (`sizing.mode: "multiplier"`) or `capital / baseCapital` (`"capital"`). A client that rounds to 0 lots gets `FAILED` with "rounds to 0 lots"; the others still trade.
 - Quantity is `lots × lot_size` (equity lot size is 1); MCX quantity is in lots.
-- Product type comes from Admin → Execution & Limits (`NRML` for F&O, `CNC` for equity by default).
+- Product type comes from Admin -> Execution & Limits (`NRML` for F&O, `CNC` for equity by default).
 - Orders are XTS limit orders at a marketable price (ask/bid ± buffer), rounded to the instrument's own tick size.
 - The engine waits for the fill pushed over the Interactive order socket (falling back to polling the order history), cancels unfilled quantity after the fill timeout, waits for the broker to confirm, and retries only what is genuinely unfilled. Fills that arrive while the cancel is in flight are counted. PAPER uses the same steps.
 - Orders of one client go out at least `orderGapMs` (110 ms) apart; different clients run in parallel.
@@ -665,7 +665,7 @@ Response:
 ]
 ```
 
-`latency`: `queueMs` waiting for the order gap, `ackMs` send → order ID, `fillMs` order ID → filled, `totalMs` Execute → filled. Every execution and per-client result is also written to the activity journal (`source: "EXECUTION"`).
+`latency`: `queueMs` waiting for the order gap, `ackMs` send -> order ID, `fillMs` order ID -> filled, `totalMs` Execute -> filled. Every execution and per-client result is also written to the activity journal (`source: "EXECUTION"`).
 
 ## Automated Strategies
 
@@ -687,7 +687,7 @@ Authorization: Bearer signed-admin-token
 
 Upload errors return `400` with `error` (all reasons joined) and `errors` (list).
 
-`allocations` (₹ per client, needs the assignment's `capital`): that client's lots = strategy lots × allocation ÷ capital. A client without an allocation uses the global sizing; `0` keeps the client out of this strategy. While the global mode is PAPER, LIVE assignments run as PAPER (status shows `assignedMode: "LIVE"`, `mode: "PAPER"`). Legs in segments that are not allowed are skipped.
+`allocations` (₹ per client, needs the assignment's `capital`): that client's lots = strategy lots × allocation / capital. A client without an allocation uses the global sizing; `0` keeps the client out of this strategy. While the global mode is PAPER, LIVE assignments run as PAPER (status shows `assignedMode: "LIVE"`, `mode: "PAPER"`). Legs in segments that are not allowed are skipped.
 
 ### Dashboard user
 
@@ -755,7 +755,7 @@ NCD_FO          -> NSECD   (currency)
 BCD_FO          -> BSECD   (currency)
 ```
 
-`NSE_COM` is not offered (no XTS segment). Tick sizes come from the instrument master (`tick_size` in paise ÷ 100).
+`NSE_COM` is not offered (no XTS segment). Tick sizes come from the instrument master (`tick_size` in paise / 100).
 
 XTS market data segment codes:
 
@@ -1150,7 +1150,7 @@ Set `ADMIN_USERNAME` and `ADMIN_PASSWORD` in `backend/.env` and restart the back
 
 ### Execute is greyed out with "Trading halted"
 
-An admin must resume trading in Admin console → Execution & Limits.
+An admin must resume trading in Admin console -> Execution & Limits.
 
 ### Broker login fails
 
@@ -1170,4 +1170,4 @@ The frontend uses the address it was opened from (REST on the same origin, WebSo
 
 ### Instruments did not load
 
-Open Admin console → Monitor. The Instruments card shows the last download error. Press **Refresh instruments** once the backend can reach Upstox.
+Open Admin console -> Monitor. The Instruments card shows the last download error. Press **Refresh instruments** once the backend can reach Upstox.

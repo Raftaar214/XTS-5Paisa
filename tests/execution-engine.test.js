@@ -25,7 +25,7 @@ function mockModule(relPath, exports) {
   require.cache[file] = m;
 }
 
-// ── Fake broker ──────────────────────────────────────────────
+// Fake broker
 // Each "plan" describes one order the engine will place, in order:
 //   placeError  : throw this from placeOrder instead of accepting
 //   beforeCancel: [[status, cumulativeFilled], ...] returned on successive polls
@@ -152,7 +152,7 @@ test("maxQtyPerOrder blocks the order before it reaches the broker", async () =>
 });
 
 test("maxOrderValue blocks the order before it reaches the broker", async () => {
-  // 10 qty × ~101.55 limit ≈ 1015 > 1000
+  // 10 qty × ~101.55 limit ~ 1015 > 1000
   const r = await runOne([], { ...CFG, limits: { maxOrderValue: 1000 } });
   assert.strictEqual(broker.placed.length, 0);
   assert.strictEqual(r.status, "FAILED");
@@ -181,7 +181,7 @@ test("latency from execute to fill is measured on every leg and attempt", async 
 test("a pushed order update is used at once — no waiting for the next poll", async () => {
   // Polling is set to a slow 1 s; the broker pushes "Filled" 40 ms after accepting.
   broker = makeBroker([{ beforeCancel: [["New", 0]], afterCancel: [["New", 0]] }]);
-  const pushes = new Map(); // appOrderId → { at, data }
+  const pushes = new Map(); // appOrderId -> { at, data }
   const origPlace = broker.placeOrder;
   broker.placeOrder = async (...a) => {
     const res = await origPlace(...a);
@@ -214,7 +214,7 @@ test("a pushed order update is used at once — no waiting for the next poll", a
 });
 
 test("prices use the instrument's own tick size (tick_size is in paise in the master)", async () => {
-  // MCX contract with a ₹1 tick: BUY at ask 101 × 1.005 = 101.505 → rounded up to 102
+  // MCX contract with a ₹1 tick: BUY at ask 101 × 1.005 = 101.505 -> rounded up to 102
   broker = makeBroker([{ beforeCancel: [["Filled", 10]], afterCancel: [["Filled", 10]] }]);
   await executeOrderMulti([{ ...LEG, segment: "MCX", tick_size: 1 }], [CLIENT], CFG);
   assert.strictEqual(broker.placed[0].limitPrice, 102);
@@ -232,12 +232,12 @@ test("the product type follows the segment (admin settings)", async () => {
 test("a fractional multiplier gives whole lots: rounded down by default, or to nearest", async () => {
   broker = makeBroker([{ beforeCancel: [["Filled", 10]], afterCancel: [["Filled", 10]] }]);
   let [r] = await executeOrderMulti([LEG], [{ ...CLIENT, multiplier: 1.5 }], CFG);
-  assert.strictEqual(broker.placed[0].qty, 10, "1 lot × 1.5 → 1 lot (floor)");
+  assert.strictEqual(broker.placed[0].qty, 10, "1 lot × 1.5 = 1 lot (floor)");
   assert.strictEqual(r.effectiveLots, 1);
 
   broker = makeBroker([{ beforeCancel: [["Filled", 20]], afterCancel: [["Filled", 20]] }]);
   [r] = await executeOrderMulti([LEG], [{ ...CLIENT, multiplier: 1.5 }], { ...CFG, sizingRounding: "round" });
-  assert.strictEqual(broker.placed[0].qty, 20, "1 lot × 1.5 → 2 lots (round)");
+  assert.strictEqual(broker.placed[0].qty, 20, "1 lot × 1.5 = 2 lots (round)");
 });
 
 test("a client too small for the order is skipped, never sent a fraction of a lot", async () => {

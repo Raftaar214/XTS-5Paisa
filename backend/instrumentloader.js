@@ -1,6 +1,6 @@
 // instrumentloader.js
 //
-// Instrument master (symbols ↔ exchange tokens). Downloaded straight from
+// Instrument master (symbols exchange tokens). Downloaded straight from
 // Upstox when the backend starts and whenever someone presses "Refresh
 // Instruments" — no hand-downloaded file is needed:
 //
@@ -23,11 +23,9 @@ const DATA_DIR   = process.env.XTS_DATA_DIR || path.join(__dirname, "data");
 const CACHE_FILE = path.join(DATA_DIR, "instruments-cache.json.gz");
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 
-// ============================================================
 // Segment mappings
-// ============================================================
 
-// Instrument-file segment string → XTS string segment
+// Instrument-file segment string -> XTS string segment
 const SEG_TO_XTS = {
   // NSE
   NSE:      "NSECM",
@@ -58,7 +56,7 @@ const SEG_TO_XTS = {
   NCDEX:     "NCDEX",
 };
 
-// XTS string segment → integer code used in market-data subscription
+// XTS string segment -> integer code used in market-data subscription
 const XTS_SEG_CODE = {
   NSECM:   1,
   NSEFO:   2,
@@ -88,9 +86,7 @@ const DASHBOARD_FIELDS = [
   "expiry", "strike_price", "lot_size", "trading_symbol", "tick_size", "name",
 ];
 
-// ============================================================
 // In-memory store
-// ============================================================
 let rawInstruments       = [];
 let dashboardInstruments = [];
 let tokenSegmentMap      = {};   // { "exchange_token": { xtsSegment, xtsSegmentCode } }
@@ -156,7 +152,7 @@ function setInstruments(payload, source = "upload") {
   tokenSegmentMap      = map;
   status.source        = source;
 
-  console.log(`📂 Instruments (${source}): ${list.length.toLocaleString()} total | ` +
+  console.log(`Instruments (${source}): ${list.length.toLocaleString()} total | ` +
     `${dash.length.toLocaleString()} F&O for dashboard | ${Object.keys(map).length.toLocaleString()} mapped tokens` +
     (missingToken ? ` | ${missingToken} without token` : ""));
   if (Object.keys(skippedSegments).length) {
@@ -179,7 +175,7 @@ function parseInstrumentBuffer(buffer) {
 }
 
 async function downloadFromUpstox() {
-  console.log(`🌐 Downloading instruments: ${INSTRUMENT_URL}`);
+  console.log(`Downloading instruments: ${INSTRUMENT_URL}`);
   const res = await axios.get(INSTRUMENT_URL, {
     responseType: "arraybuffer",
     timeout: DOWNLOAD_TIMEOUT_MS,
@@ -198,7 +194,7 @@ function writeCache(buffer) {
     const gzipped = buffer[0] === 0x1f && buffer[1] === 0x8b ? buffer : zlib.gzipSync(buffer);
     fs.writeFileSync(CACHE_FILE, gzipped);
   } catch (err) {
-    console.warn("⚠️  Could not save instrument cache:", err.message);
+    console.warn("Warning: Could not save instrument cache:", err.message);
   }
 }
 
@@ -222,7 +218,7 @@ async function doRefresh(fetcher) {
     writeCache(buffer);
   } catch (err) {
     status.lastError = err.message;
-    console.error(`❌ Instrument download failed: ${err.message}`);
+    console.error(`Error: Instrument download failed: ${err.message}`);
 
     if (rawInstruments.length) {
       console.warn("   Keeping the instruments already loaded.");
@@ -251,9 +247,7 @@ function refreshInstruments({ fetcher = downloadFromUpstox } = {}) {
   return inFlight;
 }
 
-// ============================================================
 // Getters
-// ============================================================
 function getInstruments()          { return rawInstruments; }
 function getDashboardInstruments() { return dashboardInstruments; }
 function getTokenSegmentMap()      { return tokenSegmentMap; }
@@ -272,7 +266,7 @@ function getSegmentForToken(token) {
   );
 }
 
-// Helper used in order execution — map segment string → XTS string
+// Helper used in order execution — map segment string -> XTS string
 function segmentToXTS(seg) {
   if (!seg) return "NSEFO";
   const clean = seg === "MCX_FO" ? "MCX" : seg;

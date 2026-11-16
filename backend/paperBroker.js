@@ -6,7 +6,7 @@
 // timeout, cancel, retry of the unfilled remainder, MANUAL_CHECK rules.
 //
 // Fill model: an open order fills in full as soon as the LIVE quote crosses
-// its limit — a SELL when bid ≥ limit (at the bid), a BUY when ask ≤ limit
+// its limit — a SELL when bid >= limit (at the bid), a BUY when ask <= limit
 // (at the ask). Quotes come from the broker's live market-data feed. Market
 // depth is not simulated, so there are no partial fills.
 //

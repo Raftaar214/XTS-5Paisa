@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# =====================================================================
 #  XTS Trading Desk — start on a Linux / macOS server.
 #
 #    ./start.sh           install what is missing, build the dashboard,
@@ -10,7 +9,6 @@
 #  Then open  http://<server IP>:<PORT>  in a browser.
 #  For a server that keeps running after you log out, see README.md
 #  "Deploying on a server" (systemd).
-# =====================================================================
 set -euo pipefail
 cd "$(dirname "$0")"
 

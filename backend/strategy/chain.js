@@ -10,7 +10,7 @@ const segOf = item => {
 };
 const isOption = item => item.instrument_type === "CE" || item.instrument_type === "PE";
 
-// Sorted IST expiry dates (≥ fromDate) of this underlying's options.
+// Sorted IST expiry dates (>= fromDate) of this underlying's options.
 function listExpiries(instruments, underlying, segment, fromDate) {
   const set = new Set();
   for (const it of instruments) {
@@ -96,7 +96,7 @@ function windowTokens(chain, center, n) {
 }
 
 // Forward from put-call parity at the strike nearest the spot guess:
-// F = K + (C − P)·e^{rT}. Falls back to the guess if quotes are missing.
+// F = K + (C - P)·e^{rT}. Falls back to the guess if quotes are missing.
 function forward(chain, quotes, spotGuess, T, r) {
   const atm = nearestStrike(chain, spotGuess);
   const row = chain.byStrike[atm] || {};

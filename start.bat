@@ -1,5 +1,4 @@
 @echo off
-rem ======================================================================
 rem  XTS Trading Desk - start everything with one double-click.
 rem
 rem    start.bat           install what is missing, build the dashboard,
@@ -9,7 +8,6 @@ rem    start.bat --check   do everything EXCEPT start the server
 rem
 rem  Then open  http://<this machine's IP>:<PORT>  from any computer.
 rem  Stop the server by closing this window or pressing Ctrl+C.
-rem ======================================================================
 setlocal EnableExtensions
 title XTS Trading Desk
 cd /d "%~dp0"

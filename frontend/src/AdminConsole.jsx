@@ -34,10 +34,13 @@ const fmtUptime = ms => {
   return `${h}h ${m}m`;
 };
 const fmtTime = iso => iso ? new Date(iso).toLocaleTimeString() : "—";
+// The halt reason, unless it only repeats "halted by admin".
+const haltNote = reason => {
+  const x = String(reason || "").trim().replace(/[.\s]+$/, "");
+  return x && !/^halted( by (the )?admin)?$/i.test(x) ? x : "";
+};
 
-// ─────────────────────────────────────────────────────────────
 // Login
-// ─────────────────────────────────────────────────────────────
 function AdminLogin({ onLoggedIn }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -87,9 +90,7 @@ function AdminLogin({ onLoggedIn }) {
   );
 }
 
-// ─────────────────────────────────────────────────────────────
 // Monitor tab
-// ─────────────────────────────────────────────────────────────
 function Stat({ label, value, tone = "text-gray-100", sub }) {
   return (
     <div className="bg-[#1e2329] border border-gray-700 rounded px-3 py-2 min-w-0">
@@ -109,7 +110,7 @@ function LatencyPanel({ latency, streams }) {
     <div className="bg-[#1e2329] border border-gray-700 rounded">
       <div className="flex items-center gap-2 px-3 py-1.5 border-b border-gray-700 text-[11px] font-bold text-gray-200">
         <Timer size={12} className="text-sky-400" /> Execution latency today
-        <span className="font-normal text-gray-500">queue = request → sent · ack = sent → accepted · fill = accepted → fill seen · total = request → filled</span>
+        <span className="font-normal text-gray-500">queue: request to sent · ack: sent to accepted · fill: accepted to fill seen · total: request to filled</span>
       </div>
       {!o || !o.totalMs.count ? (
         <div className="text-gray-500 text-[11px] px-3 py-3">No timed fills yet today.</div>
@@ -177,7 +178,8 @@ function Monitor() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
         <Stat label="Trading" value={trading.tradingHalted ? "HALTED" : trading.tradingMode === "LIVE" ? "LIVE" : "PAPER"}
           tone={trading.tradingHalted ? "text-red-400" : trading.tradingMode === "LIVE" ? "text-red-300" : "text-amber-300"}
-          sub={trading.haltReason || (trading.tradingMode === "LIVE" ? "Real orders go to the broker" : "Simulated — nothing reaches the broker")} />
+          sub={trading.tradingHalted ? (haltNote(trading.haltReason) ? `Reason: ${haltNote(trading.haltReason)}` : "Execute is off for everyone")
+            : trading.tradingMode === "LIVE" ? "Real orders go to the broker" : "Practice only — nothing reaches the broker"} />
         <Stat label="Market data" tone={market.takeoverSuspected ? "text-red-400" : feedTone}
           value={market.takeoverSuspected ? "Session taken over" : !market.loggedIn ? "Not logged in" : market.socketConnected ? (market.joined ? "Live ticks" : "Joining…") : "Socket down"}
           sub={market.takeoverSuspected
@@ -324,20 +326,18 @@ function Monitor() {
   );
 }
 
-// ─────────────────────────────────────────────────────────────
 // Execution & Limits tab
-// ─────────────────────────────────────────────────────────────
 const ENGINE_FIELDS = [
   ["bufferPct",     "Price buffer %",          "How far past bid/ask the limit price is set", 0.05],
   ["fillTimeout",   "Fill timeout (s)",        "Wait this long for a fill before cancelling", 1],
   ["maxRetries",    "Retries",                 "Extra attempts for the unfilled remainder",   1],
   ["pollInterval",  "Status poll interval (s)","How often order status is checked",           0.1],
-  ["cancelTimeout", "Cancel confirm wait (s)", "Longer than this → MANUAL CHECK",             1],
+  ["cancelTimeout", "Cancel confirm wait (s)", "Longer than this means MANUAL CHECK",             1],
   ["retryDelay",    "Pause between attempts (s)", "",                                         0.5],
   ["orderGapMs",    "Order spacing per client (ms)", "Lower = faster multi-leg entries; the broker allows 10 orders/s (100 ms) for non-algo apps", 10],
 ];
 const LIMIT_FIELDS = [
-  ["maxLegs",          "Max legs per execution",     "1–8",                                     1],
+  ["maxLegs",          "Max legs per execution",     "1-8",                                     1],
   ["maxLotsPerLeg",    "Max lots per leg",           "0 = no limit",                            1],
   ["maxQtyPerOrder",   "Max quantity per order",     "Per client, after multiplier · 0 = no limit", 1],
   ["maxOrderValue",    "Max order value (₹)",        "Quantity × limit price · 0 = no limit",   1000],
@@ -409,7 +409,7 @@ function TradingSetup({ s, save, saving }) {
 
         <div className="bg-[#1e2329] border border-gray-700 rounded px-3 py-3">
           <div className="text-[11px] font-bold text-gray-200 mb-2">Lot sizing per client</div>
-          {[["multiplier", "By each client's Multiplier ×"], ["capital", "By client capital"]].map(([m, label]) => (
+          {[["multiplier", "By each client's multiplier"], ["capital", "By client capital"]].map(([m, label]) => (
             <label key={m} className="flex items-center gap-2 text-[11px] text-gray-300 mb-1">
               <input type="radio" name="sizing-mode" checked={sizing.mode === m} onChange={() => setSizing(z => ({ ...z, mode: m }))} className="accent-blue-500" />
               {label}
@@ -420,7 +420,7 @@ function TradingSetup({ s, save, saving }) {
               <div className="text-[10px] text-gray-500 mb-0.5">Capital for 1x (₹) — a client with this capital trades exactly the lots entered</div>
               <input type="number" min="10000" step="100000" value={sizing.baseCapital}
                 onChange={e => setSizing(z => ({ ...z, baseCapital: e.target.value }))} className={inputCls} />
-              <div className="text-[9px] text-gray-500 mt-0.5">e.g. {inr(sizing.baseCapital)} = 1x → a {inr(sizing.baseCapital * 2)} client trades 2 lots for every lot. Set each client's capital in Clients.</div>
+              <div className="text-[9px] text-gray-500 mt-0.5">e.g. {inr(sizing.baseCapital)} = 1x, so a {inr(sizing.baseCapital * 2)} client trades 2 lots for every lot. Set each client's capital in Clients.</div>
             </div>
           )}
           <div className="text-[10px] text-gray-500 mt-2 mb-0.5">Fractions of a lot</div>
@@ -432,7 +432,7 @@ function TradingSetup({ s, save, saving }) {
             className="mt-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-[11px] font-semibold px-3 py-1 rounded-sm">
             Save sizing
           </button>
-          <div className="text-[9px] text-gray-500 mt-2">Strategies can also allocate capital per client (Strategies → assignment → Allocations).</div>
+          <div className="text-[9px] text-gray-500 mt-2">Strategies can also allocate capital per client (Strategies > assignment > Allocations).</div>
         </div>
       </div>
     </>
@@ -475,7 +475,7 @@ function ExecutionControls() {
       save({ tradingHalted: false });
     } else {
       if (!window.confirm("HALT trading? New executions will be refused until resumed. (An execution already running finishes.)")) return;
-      save({ tradingHalted: true, haltReason: reason || "Halted by admin" });
+      save({ tradingHalted: true, haltReason: reason });
       setReason("");
     }
   };
@@ -486,7 +486,7 @@ function ExecutionControls() {
     const [min, max] = s.ranges[group][key] || [];
     return (
       <div key={key} className="mb-2">
-        <div className="text-[10px] text-gray-500 mb-0.5">{label} <span className="text-gray-600">({min}–{max})</span></div>
+        <div className="text-[10px] text-gray-500 mb-0.5">{label} <span className="text-gray-600">({min}-{max})</span></div>
         <input type="number" step={step} min={min} max={max} value={draft[group][key]}
           onChange={e => setDraft(d => ({ ...d, [group]: { ...d[group], [key]: e.target.value } }))}
           className={inputCls} />
@@ -507,7 +507,9 @@ function ExecutionControls() {
             {s.tradingHalted ? "TRADING HALTED" : "TRADING ENABLED"}
           </div>
           <div className="text-[11px] text-gray-400">
-            {s.tradingHalted ? (s.haltReason || "Executions are refused.") : `Dashboard users can execute (${s.tradingMode === "LIVE" ? "LIVE — orders go to the broker" : "PAPER — simulated"}).`}
+            {s.tradingHalted
+              ? (haltNote(s.haltReason) ? `Reason: ${haltNote(s.haltReason)}. ` : "") + "Users cannot place orders."
+              : `Users can place orders (${s.tradingMode === "LIVE" ? "LIVE — real orders go to the broker" : "PAPER — practice only"}).`}
           </div>
         </div>
         {!s.tradingHalted && (
@@ -547,9 +549,7 @@ function ExecutionControls() {
   );
 }
 
-// ─────────────────────────────────────────────────────────────
 // Shell
-// ─────────────────────────────────────────────────────────────
 const TABS = [
   ["monitor",   "Monitor",            Activity],
   ["users",     "Users",              UserCog],

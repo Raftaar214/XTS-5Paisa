@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import { Loader, KeyRound, LogOut, RefreshCw, ShieldCheck } from "lucide-react";
 import { adminFetch, setAdminToken } from "./authFetch.js";
 
-// Admin → Users: every dashboard login, who is logged in right now, password
+// Admin -> Users: every dashboard login, who is logged in right now, password
 // resets per user, and the admin's own password. Passwords are never shown.
 
 const inputCls = "bg-[#161a1f] border border-gray-600 text-white text-[12px] px-2 py-1.5 rounded-sm focus:outline-none focus:border-blue-500";
@@ -156,8 +156,8 @@ export default function AdminUsers() {
                     <td className="px-3 py-1.5 text-white font-semibold">{u.username}</td>
                     <td className="px-3 py-1.5">
                       {u.session
-                        ? <span className="text-emerald-400 font-semibold">● Logged in</span>
-                        : <span className="text-gray-500">○ Logged out</span>}
+                        ? <span className="inline-flex items-center gap-1.5 text-emerald-400 font-semibold"><span aria-hidden="true" className="w-1.5 h-1.5 rounded-full bg-emerald-400" />Logged in</span>
+                        : <span className="inline-flex items-center gap-1.5 text-gray-500"><span aria-hidden="true" className="w-1.5 h-1.5 rounded-full border border-gray-500" />Logged out</span>}
                     </td>
                     <td className="px-3 py-1.5 text-gray-300 font-mono">{u.session?.ip || "—"}</td>
                     <td className="px-3 py-1.5 text-gray-300">{fmt(u.session?.since)}</td>

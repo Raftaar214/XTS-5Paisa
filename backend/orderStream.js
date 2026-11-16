@@ -18,8 +18,8 @@ const EventEmitter = require("events");
 const bus = new EventEmitter();
 bus.setMaxListeners(0);
 
-const latest = new Map();   // appOrderId → { at, data }
-const sockets = new Map();  // clientId → { socket, connected, lastEventAt }
+const latest = new Map();   // appOrderId -> { at, data }
+const sockets = new Map();  // clientId -> { socket, connected, lastEventAt }
 const MAX_REMEMBERED = 5000;
 
 function parse(raw) {
@@ -64,9 +64,9 @@ function connect(client, rootUrl) {
   });
   const entry = { socket, connected: false, lastEventAt: null };
   sockets.set(client.id, entry);
-  socket.on("connect",    () => { entry.connected = true;  console.log(`⚡ Order stream connected: ${client.id}`); });
-  socket.on("disconnect", r  => { entry.connected = false; console.log(`⚡ Order stream disconnected: ${client.id} (${r})`); });
-  socket.on("error",      e  => console.warn(`⚡ Order stream error ${client.id}:`, e?.message || e));
+  socket.on("connect",    () => { entry.connected = true;  console.log(`Order stream connected: ${client.id}`); });
+  socket.on("disconnect", r  => { entry.connected = false; console.log(`Order stream disconnected: ${client.id} (${r})`); });
+  socket.on("error",      e  => console.warn(`Order stream error ${client.id}:`, e?.message || e));
   socket.on("logout",     () => { entry.connected = false; });
   socket.on("order",      raw => { entry.lastEventAt = Date.now(); handleOrderMessage(raw); });
   socket.on("trade",      ()  => { entry.lastEventAt = Date.now(); });

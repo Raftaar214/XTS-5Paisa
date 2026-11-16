@@ -2,9 +2,9 @@ import React, { useState, useEffect, useCallback } from "react";
 import { Plus, Save, Trash2, RotateCcw, Loader } from "lucide-react";
 import { adminFetch } from "./authFetch.js";
 
-// Admin console → Clients tab.
+// Admin console -> Clients tab.
 // Parent (Interactive + Market Data API) and Child (Interactive API, sized by
-// Multiplier ×) roster: add, edit keys, assign to a dashboard login, delete,
+// Multiplier) roster: add, edit keys, assign to a dashboard login, delete,
 // and log in / connect / enable any client. Secrets are only ever shown
 // masked; leaving a key field blank while editing keeps the stored value.
 
@@ -187,7 +187,7 @@ export default function AdminClients() {
                   <th className="py-1.5 px-2">Client ID</th>
                   <th className="py-1.5 px-2">Role</th>
                   <th className="py-1.5 px-2">Assigned To</th>
-                  <th className="py-1.5 px-2">Mult ×</th>
+                  <th className="py-1.5 px-2">Mult (x)</th>
                   <th className="py-1.5 px-2">Capital</th>
                   <th className="py-1.5 px-2">Interactive Key</th>
                   <th className="py-1.5 px-2">Market Key</th>
@@ -285,12 +285,12 @@ export default function AdminClients() {
               </select>
             </FormRow>
             {form.role === "CHILD" && (
-              <FormRow label="Multiplier ×">
+              <FormRow label="Multiplier (x)">
                 <input type="number" min="0.1" step="0.1" value={form.multiplier}
                   onChange={e => setForm(f => ({ ...f, multiplier: e.target.value }))} className={inputCls} placeholder="e.g. 2 for 2x parent size" />
               </FormRow>
             )}
-            <FormRow label="Capital (₹)" hint="Account capital — used when Admin → Execution & Limits sizes lots by capital (e.g. ₹1 Cr = 1x).">
+            <FormRow label="Capital (₹)" hint="Account capital — used when Admin > Execution & Limits sizes lots by capital (e.g. ₹1 Cr = 1x).">
               <input type="number" min="0" step="100000" value={form.capital}
                 onChange={e => setForm(f => ({ ...f, capital: e.target.value }))} className={inputCls} placeholder="e.g. 10000000 for ₹1 Cr" />
             </FormRow>

@@ -4,7 +4,7 @@ import { API_BASE } from "./config.js";
 import { downloadFile, todayIst } from "./download.js";
 import JournalView from "./JournalView.jsx";
 
-// Dashboard → Automated Strategies: the strategies the admin assigned to
+// Dashboard -> Automated Strategies: the strategies the admin assigned to
 // this user. Start arms the strategy; it then trades by itself on its entry
 // days and times while the backend runs (the browser can be closed).
 
@@ -14,7 +14,7 @@ const statusTone = {
   PAUSED:   "bg-fuchsia-500/20 text-fuchsia-300 border-fuchsia-500/40",
   STOPPED:  "bg-gray-600/30 text-gray-400 border-gray-600/40",
 };
-const money = v => (v == null ? "—" : `${v >= 0 ? "" : "−"}₹${Math.abs(v).toFixed(2)}`);
+const money = v => (v == null ? "—" : `${v >= 0 ? "" : "-"}₹${Math.abs(v).toFixed(2)}`);
 
 async function api(path, method = "GET") {
   const r = await fetch(`${API_BASE}${path}`, { method, headers: { "Content-Type": "application/json" } });
@@ -36,7 +36,7 @@ function Positions({ list }) {
           return (
             <tr key={p.id} className="border-t border-gray-800">
               <td className="px-2 py-1 text-gray-300">{p.client}</td>
-              <td className="px-2 py-1 text-gray-200">{p.tradingSymbol}{p.delta != null && <span className="text-gray-500"> Δ{p.delta}</span>}</td>
+              <td className="px-2 py-1 text-gray-200">{p.tradingSymbol}{p.delta != null && <span className="text-gray-500"> delta {p.delta}</span>}</td>
               <td className={`px-2 py-1 font-semibold ${p.side === "SELL" ? "text-red-400" : "text-blue-400"}`}>{p.side}</td>
               <td className="px-2 py-1 text-gray-300">{p.qty}</td>
               <td className="px-2 py-1 text-gray-300">{p.entryPrice}</td>
@@ -156,7 +156,7 @@ export default function StrategyPanel({ log }) {
       await load();
     } catch (e) {
       setError(e.message);
-      log?.(`❌ Strategy ${s.strategyName}: ${action} failed — ${e.message}`);
+      log?.(`Error: Strategy ${s.strategyName}: ${action} failed — ${e.message}`);
     } finally {
       setBusyId(null);
     }

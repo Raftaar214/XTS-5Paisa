@@ -81,7 +81,7 @@ function impliedVol(premium, F, K, T, r, type) {
 
 const MS_PER_YEAR = 365 * 24 * 3600 * 1000;
 
-// Time from `nowMs` to 15:30 IST on the expiry date, in years (≥ 1 minute).
+// Time from `nowMs` to 15:30 IST on the expiry date, in years (>= 1 minute).
 function yearsToExpiry(nowMs, expiryDate) {
   const closeMs = ist.timeOn(expiryDate, "15:30");
   return Math.max(60_000, closeMs - nowMs) / MS_PER_YEAR;

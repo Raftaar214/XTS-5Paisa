@@ -19,7 +19,7 @@ const path = require("path");
 const Module = require("module");
 const WebSocket = require(require.resolve("ws", { paths: [BACKEND] }));
 
-// ── isolated environment (set before anything loads dotenv) ──
+// isolated environment (set before anything loads dotenv)
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "xts-server-test-"));
 fs.writeFileSync(path.join(dataDir, "clients.json"), JSON.stringify([
   { id: "P1", name: "Parent", role: "PARENT", multiplier: 1, rootUrl: "https://example.invalid", source: "WEBAPI",
@@ -80,7 +80,7 @@ mockModule("./xtsApi.js", {
   getPositions: async () => [],
 });
 let priceCb = null;
-const owned = new Map(); // owner → Set(token), like the real Marketsocket
+const owned = new Map(); // owner -> Set(token), like the real Marketsocket
 mockModule("./Marketsocket.js", {
   loginMarketData: async () => null,
   connectMarketSocket: () => {},
@@ -219,7 +219,7 @@ test("risk limits reject executions before any order is placed", async () => {
   r = await call("POST", "/api/order", { token: t, body: { legs: [{ ...LEG, lots: "5" }] } });
   assert.strictEqual(r.status, 400, "too many lots");
 
-  // 1 lot × 10 × 2x multiplier = 20 > maxQtyPerOrder 5 → engine refuses per client
+  // 1 lot × 10 × 2x multiplier = 20 > maxQtyPerOrder 5 -> engine refuses per client
   r = await call("POST", "/api/order", { token: t, body: { legs: [LEG] } });
   assert.strictEqual(r.status, 200, JSON.stringify(r.data));
   assert.ok(r.data.every(x => x.status === "FAILED" && /Risk limit/.test(x.error)), JSON.stringify(r.data));
@@ -293,7 +293,7 @@ test("quote WebSocket accepts a dashboard token and streams quotes", async () =>
   ws.close();
 });
 
-// ── automated strategies ──
+// automated strategies
 const v38 = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", "0dte-v2_v38.strategy.json"), "utf8"));
 let strategyId, assignmentId;
 
@@ -385,7 +385,7 @@ test("a client card can list that client's strategy positions (own strategies on
   assert.deepStrictEqual(r.data.map(p => p.id), ["pos_t1"]);
   assert.strictEqual(r.data[0].strategyName, "0dte v2");
   assert.strictEqual(r.data[0].ltp, 100.5);              // live quote from the feed
-  assert.strictEqual(r.data[0].unrealized, -9075);       // (40 − 100.5) × 150
+  assert.strictEqual(r.data[0].unrealized, -9075);       // (40 - 100.5) × 150
 
   const bob = await userToken("bob", "bob-pw");
   r = await call("GET", "/api/clients/C1/strategy-positions", { token: bob });
@@ -443,7 +443,7 @@ test("LIVE strategy trades are left out of the Algo views (they belong to the br
   strategyStore.saveRun(run);
 });
 
-// ── daily trade books (admin) ──
+// daily trade books (admin)
 test("opening a client's Trades view saves a copy of the broker trade book for the day", async () => {
   const alice = await userToken("alice", "alice-pw");
   const r = await call("GET", "/api/clients/C1/trades", { token: alice });
@@ -485,7 +485,7 @@ test("admin can take a trade book snapshot of every logged-in client now", async
   assert.ok(r.data.saved.some(s => s.clientId === "C1" && s.count === 2), JSON.stringify(r.data));
 });
 
-// ── client margins (admin) ──
+// client margins (admin)
 test("admin sees each client's utilized and available margin, cached briefly", async () => {
   const admin = await adminToken();
   const before = balanceCalls;
@@ -494,7 +494,7 @@ test("admin sees each client's utilized and available margin, cached briefly", a
   const c1 = r.data.find(m => m.clientId === "C1");
   assert.deepStrictEqual([c1.loggedIn, c1.utilized, c1.available, c1.total, c1.usedPct], [true, 120000, 180000, 300000, 40]);
   const c2 = r.data.find(m => m.clientId === "C2");
-  assert.strictEqual(c2.loggedIn, false, "not logged in → no broker call, shown as unavailable");
+  assert.strictEqual(c2.loggedIn, false, "not logged in: no broker call, shown as unavailable");
   const afterFirst = balanceCalls;
   assert.ok(afterFirst > before);
 
@@ -512,7 +512,7 @@ test("trade book routes are admin-only", async () => {
   assert.strictEqual((await call("GET", "/api/admin/tradebooks", { token: alice })).status, 401);
 });
 
-// ── one port: dashboard + API + quote WebSocket ──
+// one port: dashboard + API + quote WebSocket
 const http = require("http");
 function rawGet(pathname, headers) {
   return new Promise((resolve, reject) => {
@@ -574,7 +574,7 @@ test("the quote WebSocket also runs on the API port at /ws", async () => {
   sameServer.close();
 });
 
-// ── one active login per user ──
+// one active login per user
 test("a second login for a user who is already logged in is warned, not let in", async () => {
   await userToken("bob", "bob-pw");
   const r = await call("POST", "/api/auth/login", { body: { username: "bob", password: "bob-pw" } });
@@ -625,7 +625,7 @@ test("admin sees active sessions and can end one", async () => {
   assert.strictEqual((await call("GET", "/api/clients", { token: userTokens.bob })).status, 401);
 });
 
-// ── segments the admin allows ──
+// segments the admin allows
 test("only admin-allowed segments are listed and tradable", async () => {
   const admin = await adminToken();
   const loader = require(BACKEND + "/instrumentloader");
@@ -650,7 +650,7 @@ test("only admin-allowed segments are listed and tradable", async () => {
   await call("PUT", "/api/admin/settings", { token: admin, body: { tradingHalted: true } });
 });
 
-// ── sizing by client capital ──
+// sizing by client capital
 test("with capital sizing, each client trades lots in proportion to its capital", async () => {
   const admin = await adminToken();
   let r = await call("PUT", "/api/admin/clients/C1", { token: admin, body: { capital: 20000000 } });  // ₹2 Cr
@@ -664,9 +664,9 @@ test("with capital sizing, each client trades lots in proportion to its capital"
   r = await call("POST", "/api/order", { token: t, body: { legs: [LEG] } });   // 1 lot of 10, PAPER
   assert.strictEqual(r.status, 200, JSON.stringify(r.data));
   const c1 = r.data.find(x => x.client === "C1");
-  assert.strictEqual(c1.requestedQty, 20, "₹2 Cr ÷ ₹1 Cr = 2 lots");
+  assert.strictEqual(c1.requestedQty, 20, "₹2 Cr / ₹1 Cr = 2 lots");
   const p1 = r.data.find(x => x.client === "P1");
-  assert.strictEqual(p1.status, "FAILED", "P1 has no capital set → 0 lots, skipped");
+  assert.strictEqual(p1.status, "FAILED", "P1 has no capital set: 0 lots, skipped");
   assert.match(p1.error, /0 lots/);
   await call("PUT", "/api/admin/settings", { token: admin, body: { tradingHalted: true, sizing: { mode: "multiplier" } } });
 });
@@ -686,21 +686,21 @@ test("a strategy assignment can allocate capital per client", async () => {
   assert.strictEqual(bad.status, 400, "C2 is not one of alice's clients");
 });
 
-// ── dashboard activity log, saved on the server ──
+// dashboard activity log, saved on the server
 test("dashboard log lines are saved to the user's activity journal and come back in the CSV", async () => {
   const t = await userToken("alice", "alice-pw");
   const ts = Date.now();
   let r = await call("POST", "/api/activity", { token: t, body: { entries: [
-    { ts, message: "Legs: 2 → 4" },
-    { ts: ts + 1, message: "❌ P1 | NIFTY CE 25000 | FAILED — RMS reject" },
+    { ts, message: "Legs: 2 to 4" },
+    { ts: ts + 1, message: "Error: P1 | NIFTY CE 25000 | FAILED — RMS reject" },
   ] } });
   assert.strictEqual(r.status, 200);
   assert.strictEqual(r.data.saved, 2);
   const rows = (await call("GET", "/api/journal/events", { token: t })).data.rows.filter(e => e.source === "UI");
-  assert.ok(rows.some(e => e.message === "Legs: 2 → 4" && e.user === "alice" && e.level === "info"));
+  assert.ok(rows.some(e => e.message === "Legs: 2 to 4" && e.user === "alice" && e.level === "info"));
   assert.ok(rows.some(e => /FAILED/.test(e.message) && e.level === "error"));
   const csv = await fetch(`${base}/api/journal/events?format=csv`, { headers: { Authorization: `Bearer ${t}` } });
-  assert.match(await csv.text(), /Legs: 2 → 4/);
+  assert.match(await csv.text(), /Legs: 2 to 4/);
 });
 
 test("activity uploads are bounded", async () => {
@@ -725,7 +725,7 @@ test("a manual execution logs every client's result on the server, filled ones t
   await call("PUT", "/api/admin/settings", { token: admin, body: { tradingHalted: true } });
 });
 
-// ── leg subscriptions ──
+// leg subscriptions
 test("'unsubscribe all' releases every token this user's dashboard holds, and no one else's", async () => {
   const t = await userToken("alice", "alice-pw");
   await call("POST", "/api/subscribe", { token: t, body: { tokens: ["111", "222"], segments: ["NSE_FO", "NSE_FO"] } });
@@ -744,7 +744,7 @@ test("logging out releases that user's leg tokens", async () => {
   assert.deepStrictEqual([...owned.get("ui:alice")], []);
 });
 
-// ── Users tab: logins and passwords ──
+// Users tab: logins and passwords
 test("admin lists dashboard users with login state, never passwords", async () => {
   const admin = await adminToken();
   await userToken("alice", "alice-pw");

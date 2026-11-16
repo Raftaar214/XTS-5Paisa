@@ -3,7 +3,7 @@ import { Download, Loader, RefreshCw, Save, Eye } from "lucide-react";
 import { adminFetch, getAdminToken, API_BASE } from "./authFetch.js";
 import { downloadFile, rowsToCsv, saveText, todayIst } from "./download.js";
 
-// Admin console → Trade Books: every client's trade book, kept per day.
+// Admin console -> Trade Books: every client's trade book, kept per day.
 //   Broker = saved copy of the broker's own trade book (refreshed every 5 min
 //            in market hours and whenever a Trades view is opened)
 //   App    = trades this app placed (manual + strategy, LIVE + PAPER)

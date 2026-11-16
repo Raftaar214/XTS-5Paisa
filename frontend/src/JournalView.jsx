@@ -4,7 +4,7 @@ import { todayIst } from "./download.js";
 
 // Trade book + activity log viewer, backed by the server journal (durable
 // per-day files). Used by the dashboard (own records) and the admin console
-// (everyone). `load(kind, date)` → { rows, dates }; `download(kind, date)`.
+// (everyone). `load(kind, date)` -> { rows, dates }; `download(kind, date)`.
 
 const TRADE_COLS = [
   ["time", "Time"], ["source", "Source"], ["mode", "Mode"], ["user", "User"], ["strategy", "Strategy"],

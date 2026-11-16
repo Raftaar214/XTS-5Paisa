@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
+import { LogOut } from "lucide-react";
 import App from "./App.jsx";
 import LoginPage from "./LoginPage.jsx";
 import AdminConsole from "./AdminConsole.jsx";
@@ -22,7 +23,7 @@ export default function AuthGate() {
     return () => { expireHandler = null; };
   }, []);
 
-  // Ctrl+Shift+Space → Admin console (works on the login screen too).
+  // Ctrl+Shift+Space -> Admin console (works on the login screen too).
   useEffect(() => {
     const onKey = e => {
       if (e.ctrlKey && e.shiftKey && (e.code === "Space" || e.key === " ")) {
@@ -98,9 +99,10 @@ export default function AuthGate() {
             border: "1px solid #374151", borderRadius: 4,
             fontSize: 10, fontWeight: 600, padding: "4px 8px",
             cursor: "pointer", letterSpacing: "0.02em",
+            display: "inline-flex", alignItems: "center", gap: 4,
           }}
         >
-          ⎋ LOGOUT{username ? ` (${username})` : ""}
+          <LogOut size={12} aria-hidden="true" /> LOGOUT{username ? ` (${username})` : ""}
         </button>
       </div>
     );

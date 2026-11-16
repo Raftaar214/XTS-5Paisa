@@ -32,14 +32,12 @@ const app     = express();
 const PORT    = parseInt(process.env.PORT    || "5000");
 const WS_PORT = parseInt(process.env.WS_PORT || "3002");
 
-// ─────────────────────────────────────────────────────────────
 // CORS — only known browser origins may call the API.
 // CORS_ORIGINS=https://desk.example.com,https://other.example.com
 // When unset, localhost and private-LAN addresses are allowed (dev / office
 // network), and so is the server's own address — a dashboard opened at
 // http://<server-ip>:<port> served by this backend. Set CORS_ORIGINS
 // explicitly for any internet-facing deployment.
-// ─────────────────────────────────────────────────────────────
 const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || "").split(",").map(s => s.trim()).filter(Boolean);
 const PRIVATE_HOST = /^(localhost|127\.\d+\.\d+\.\d+|\[::1\]|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)$/;
 
@@ -57,7 +55,7 @@ function isAllowedOrigin(origin, hostHeader) {
   } catch { return false; }
 }
 if (!ALLOWED_ORIGINS.length) {
-  console.warn("⚠️  CORS_ORIGINS not set — allowing localhost / private-LAN origins only. Set it before exposing this server publicly.");
+  console.warn("Warning: CORS_ORIGINS not set — allowing localhost / private-LAN origins only. Set it before exposing this server publicly.");
 }
 
 app.use((req, res, next) => {
@@ -75,24 +73,20 @@ const largeJson = express.json({ limit: "200mb" });
 app.use((req, res, next) =>
   (req.method === "POST" && req.path === "/api/instruments" ? largeJson : smallJson)(req, res, next));
 
-// ─────────────────────────────────────────────────────────────
 // Login gates
 // Public:  POST /api/auth/login,  GET /api/auth/verify
 //          POST /api/admin/login, GET /api/admin/verify
 // /api/admin/*  requires an ADMIN token (Admin console, Ctrl+Shift+Space)
 // /api/*        requires a dashboard USER token
-// ─────────────────────────────────────────────────────────────
 app.post("/api/auth/login",  auth.login);
 app.get("/api/auth/verify",  auth.verify);
 app.post("/api/auth/logout", auth.logout);
 app.post("/api/admin/login", auth.adminLogin);
 app.get("/api/admin/verify", auth.adminVerify);
 
-// ─────────────────────────────────────────────────────────────
 // WebSocket — broadcasts bid/ask quotes to logged-in dashboards.
 // Runs on the API port at /ws:  ws://<host>:<PORT>/ws?token=<dashboard token>
 // (startWS(<number>) still opens a standalone port — used by tests.)
-// ─────────────────────────────────────────────────────────────
 const quoteServers = new Set();
 let wss = null; // the main one (for the monitor's socket count)
 let broadcasting = false;
@@ -125,7 +119,7 @@ function startWS(target = WS_PORT) {
   });
   quoteServers.add(server);
   if (!wss) wss = server;
-  console.log(attach ? "📡 Quote WebSocket on /ws (same port as the API)" : `📡 Quote WebSocket on port ${target}`);
+  console.log(attach ? "Quote WebSocket on /ws (same port as the API)" : `Quote WebSocket on port ${target}`);
 
   if (!sessionWatch) {
     sessionWatch = true;
@@ -141,12 +135,12 @@ function startWS(target = WS_PORT) {
 
   server.on("connection", (ws, req) => {
     ws.user = req.user;
-    console.log(`🟢 Frontend connected (${ws.user.username})`);
+    console.log(`Frontend connected (${ws.user.username})`);
     const quotes = getLivePrices();
     if (Object.keys(quotes).length > 0) {
       ws.send(JSON.stringify({ type: "quotes", data: quotes }));
     }
-    ws.on("close", ()  => console.log(`🔴 Frontend disconnected (${ws.user.username})`));
+    ws.on("close", ()  => console.log(`Frontend disconnected (${ws.user.username})`));
     ws.on("error", err => console.error("WS client error:", err.message));
   });
 
@@ -171,28 +165,24 @@ function startWS(target = WS_PORT) {
   return server;
 }
 
-// ─────────────────────────────────────────────────────────────
 // Market data bootstrap — credentials come from the PARENT client.
 // Re-run whenever the Parent is added/edited in the Admin console.
-// ─────────────────────────────────────────────────────────────
 async function bootMarketData() {
-  console.log("\n─── Market Data ─────────────────────────────────");
+  console.log("\nMarket Data");
   try {
     const mdToken = await loginMarketData();
     if (mdToken) {
       connectMarketSocket();
     } else {
-      console.warn("⚠️  Bid/Ask will show '—' — add a Parent client with Market Data API Key/Secret in the Admin console.\n");
+      console.warn("Bid/Ask will show '—' — add a Parent client with Market Data API Key/Secret in the Admin console.\n");
     }
   } catch (err) {
-    console.warn("⚠️  Market data login error:", err.message);
+    console.warn("Market data login error:", err.message);
   }
-  console.log("─────────────────────────────────────────────────\n");
+  console.log("");
 }
 
-// ─────────────────────────────────────────────────────────────
 // Broker session helpers (shared by dashboard and admin routes)
-// ─────────────────────────────────────────────────────────────
 function brokerError(err) {
   const body = err.response?.data;
   return body?.description || body?.error || err.message || "Login failed";
@@ -201,7 +191,7 @@ function brokerError(err) {
 async function brokerLogin(c) {
   const r = await loginClient(c);
   c.token = r.token; c.userID = r.userID; c.isLogged = true;
-  console.log(`✅ ${c.id} logged in — userID: ${c.userID}`);
+  console.log(`${c.id} logged in — userID: ${c.userID}`);
   // Pushed order updates for instant fill detection (receive-only socket).
   if (typeof connectOrderStream === "function") {
     try { connectOrderStream(c); } catch (err) { console.warn(`Order stream ${c.id}: ${err.message}`); }
@@ -218,9 +208,7 @@ async function brokerLogout(c) {
 
 function findClient(id) { return clients.find(x => x.id === id); }
 
-// ─────────────────────────────────────────────────────────────
 // Automated strategies
-// ─────────────────────────────────────────────────────────────
 const MARKET_STALE_MS = 120_000;
 
 function engineConfig() {
@@ -228,9 +216,9 @@ function engineConfig() {
   return { ...s.engine, products: s.products, sizingRounding: s.sizing?.rounding, limits: { maxQtyPerOrder: s.limits.maxQtyPerOrder, maxOrderValue: s.limits.maxOrderValue } };
 }
 
-// Lots per client for one lot of a leg (Admin → Execution & Limits → Sizing):
+// Lots per client for one lot of a leg (Admin -> Execution & Limits -> Sizing):
 //   multiplier — the client's Multiplier × (parent 1x)
-//   capital    — client capital ÷ base capital (0 when the client has no capital set)
+//   capital    — client capital / base capital (0 when the client has no capital set)
 function sizingFactor(c) {
   const z = settings.getSettings().sizing || {};
   if (z.mode === "capital") return c.capital > 0 && z.baseCapital > 0 ? c.capital / z.baseCapital : 0;
@@ -311,9 +299,9 @@ function strategySummary(s) {
     exit: spec.exit.intradayAt ? `square off ${spec.exit.intradayAt}` : "hold to expiry",
     groups: spec.groups.map(g => ({
       id: g.id,
-      window: g.slots.length ? `${g.slots[0]}–${g.slots[g.slots.length - 1]}` : "",
+      window: g.slots.length ? `${g.slots[0]}-${g.slots[g.slots.length - 1]}` : "",
       entries: g.slots.length,
-      legs: g.legs.map(l => `${l.action} ${l.lots}L ${l.type} ${l.strike.rule === "delta" ? `Δ${l.strike.delta}` : l.strike.rule === "premium" ? `₹${l.strike.premium}` : `ATM${l.strike.n >= 0 ? "+" : ""}${l.strike.n}`}`),
+      legs: g.legs.map(l => `${l.action} ${l.lots}L ${l.type} ${l.strike.rule === "delta" ? `delta ${l.strike.delta}` : l.strike.rule === "premium" ? `₹${l.strike.premium}` : `ATM${l.strike.n >= 0 ? "+" : ""}${l.strike.n}`}`),
     })),
   };
 }
@@ -338,10 +326,10 @@ function validateAssignment(a) {
   }
 }
 
-// ── journal helpers (trade book + activity log) ──
+// journal helpers (trade book + activity log)
 const todayIst = () => require("./strategy/ist").parts(Date.now()).date;
 
-// ── daily broker trade book copies ──
+// daily broker trade book copies
 // Read-only: getTrades is a GET of the broker's trade book; nothing is placed.
 async function snapshotTradeBook(c) {
   const trades = await getTrades(c);
@@ -402,9 +390,7 @@ function sendJournal(req, res, filter, prefix) {
   res.json({ date, dates: journal.listDates(kind).slice(0, 60), rows });
 }
 
-// ═════════════════════════════════════════════════════════════
 // ADMIN ROUTES  (/api/admin/*)
-// ═════════════════════════════════════════════════════════════
 const admin = express.Router();
 admin.use(auth.requireAdmin);
 
@@ -435,7 +421,7 @@ admin.post("/password", (req, res) => {
   res.json({ success: true, token: r.token, expiresInMs: r.expiresInMs });
 });
 
-// ── Client roster: parent/child, Interactive + Market Data keys ──
+// Client roster: parent/child, Interactive + Market Data keys
 admin.get("/clients", (_, res) => res.json(clients.map(clientManagementView)));
 
 admin.post("/clients", (req, res) => {
@@ -477,7 +463,7 @@ admin.delete("/clients/:id", async (req, res) => {
   }
 });
 
-// ── Session control for ANY client ──
+// Session control for ANY client
 admin.post("/clients/:id/:action(login|logout|connect|disconnect|toggle)", async (req, res) => {
   const c = findClient(req.params.id);
   if (!c) return res.status(404).json({ error: "Client not found" });
@@ -514,7 +500,7 @@ admin.post("/clients/logout-all", async (req, res) => {
   res.json({ success: true });
 });
 
-// ── Live execution controls: kill switch, engine, risk limits ──
+// Live execution controls: kill switch, engine, risk limits
 admin.get("/settings", (_, res) => res.json({
   ...settings.getSettings(),
   ranges: { engine: settings.ENGINE_RANGES, limits: settings.LIMIT_RANGES },
@@ -527,13 +513,13 @@ admin.put("/settings", (req, res) => {
     const before = settings.getSettings();
     const next = settings.updateSettings(req.body || {});
     const diffs = [];
-    if (before.tradingMode !== next.tradingMode) diffs.push(`MODE ${before.tradingMode} → ${next.tradingMode}`);
-    if (JSON.stringify(before.allowedSegments) !== JSON.stringify(next.allowedSegments)) diffs.push(`segments → ${next.allowedSegments.join(",")}`);
-    if (JSON.stringify(before.sizing) !== JSON.stringify(next.sizing)) diffs.push(`sizing → ${JSON.stringify(next.sizing)}`);
+    if (before.tradingMode !== next.tradingMode) diffs.push(`MODE ${before.tradingMode} -> ${next.tradingMode}`);
+    if (JSON.stringify(before.allowedSegments) !== JSON.stringify(next.allowedSegments)) diffs.push(`segments -> ${next.allowedSegments.join(",")}`);
+    if (JSON.stringify(before.sizing) !== JSON.stringify(next.sizing)) diffs.push(`sizing -> ${JSON.stringify(next.sizing)}`);
     if (before.tradingHalted !== next.tradingHalted) diffs.push(next.tradingHalted ? `HALTED (${next.haltReason})` : "RESUMED trading");
     for (const g of ["engine", "limits"]) {
       for (const k of Object.keys(next[g])) {
-        if (before[g][k] !== next[g][k]) diffs.push(`${g}.${k} ${before[g][k]} → ${next[g][k]}`);
+        if (before[g][k] !== next[g][k]) diffs.push(`${g}.${k} ${before[g][k]} -> ${next[g][k]}`);
       }
     }
     monitor.recordAudit(actor(req), "Changed settings", diffs.join("; ") || "no change");
@@ -543,7 +529,7 @@ admin.put("/settings", (req, res) => {
   }
 });
 
-// ── Production monitor ──
+// Production monitor
 admin.get("/monitor", (_, res) => {
   const mem = process.memoryUsage();
   res.json({
@@ -579,7 +565,7 @@ admin.post("/instruments/refresh", async (req, res) => {
   }
 });
 
-// ── Strategy library (uploaded bt-strategy-config files) ──
+// Strategy library (uploaded bt-strategy-config files)
 admin.get("/strategies", (_, res) => res.json(strategyStore.listStrategies().map(strategyView)));
 
 admin.post("/strategies", (req, res) => {
@@ -612,13 +598,13 @@ admin.get("/strategies/:id/raw", (req, res) => {
   res.json(s.raw);
 });
 
-// ── Assignments: which user runs which strategy, on which clients ──
+// Assignments: which user runs which strategy, on which clients
 admin.get("/assignments", (_, res) => res.json(strategyStore.listAssignments().map(a => runner.status(a.id))));
 
 admin.post("/assignments", (req, res) => {
   try {
     const a = strategyStore.addAssignment(req.body || {}, validateAssignment);
-    monitor.recordAudit(actor(req), "Assigned strategy", `${strategyStore.getStrategy(a.strategyId)?.name} → ${a.username} (${a.mode})`);
+    monitor.recordAudit(actor(req), "Assigned strategy", `${strategyStore.getStrategy(a.strategyId)?.name} -> ${a.username} (${a.mode})`);
     res.json(runner.status(a.id));
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
@@ -634,7 +620,7 @@ admin.put("/assignments/:id", (req, res) => {
       return res.status(409).json({ error: "Stop the strategy before switching PAPER / LIVE" });
     }
     const a = strategyStore.updateAssignment(req.params.id, req.body || {}, validateAssignment);
-    monitor.recordAudit(actor(req), "Updated assignment", `${a.id}: ${Object.keys(req.body || {}).join(", ")}${prevMode !== a.mode ? ` (mode ${prevMode} → ${a.mode})` : ""}`);
+    monitor.recordAudit(actor(req), "Updated assignment", `${a.id}: ${Object.keys(req.body || {}).join(", ")}${prevMode !== a.mode ? ` (mode ${prevMode} -> ${a.mode})` : ""}`);
     res.json(runner.status(a.id));
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
@@ -662,10 +648,10 @@ admin.post("/assignments/:id/:action(start|stop|squareoff|resume)", (req, res) =
   }
 });
 
-// ── Client margins: utilized / available (read-only, cached 30 s) ──
+// Client margins: utilized / available (read-only, cached 30 s)
 const { parseBalance } = require("./margin");
 const MARGIN_CACHE_MS = 30_000;
-const marginCache = new Map(); // clientId → { at, data }
+const marginCache = new Map(); // clientId -> { at, data }
 
 async function marginFor(c, refresh) {
   const base = { clientId: c.id, clientName: c.name, role: c.role, assignedTo: c.assignedTo || "", loggedIn: !!c.isLogged };
@@ -692,7 +678,7 @@ admin.get("/margins", async (req, res) => {
   res.json(out);
 });
 
-// ── Daily trade books of every client ──
+// Daily trade books of every client
 // source=broker: the saved copy of the broker's own trade book
 // source=app:    trades this app placed (journal: manual + strategy, LIVE + PAPER)
 const bookDate = req => (/^\d{4}-\d{2}-\d{2}$/.test(String(req.query.date || "")) ? req.query.date : todayIst());
@@ -756,7 +742,7 @@ admin.post("/tradebooks/snapshot", async (req, res) => {
   res.json(result);
 });
 
-// ── Journal: every user's trades and events ──
+// Journal: every user's trades and events
 admin.get("/journal/:kind(trades|events)", (req, res) => {
   const user = req.query.user ? String(req.query.user) : null;
   sendJournal(req, res, user ? r => r.user === user : null, "all-");
@@ -764,12 +750,10 @@ admin.get("/journal/:kind(trades|events)", (req, res) => {
 
 app.use("/api/admin", admin);
 
-// ═════════════════════════════════════════════════════════════
 // DASHBOARD ROUTES  (/api/*, dashboard user token)
-// ═════════════════════════════════════════════════════════════
 app.use("/api", auth.requireAuth);
 
-// ── The built dashboard (frontend/dist), so the whole app runs on one port ──
+// The built dashboard (frontend/dist), so the whole app runs on one port
 const FRONTEND_DIST = process.env.FRONTEND_DIST || path.join(__dirname, "..", "frontend", "dist");
 const FRONTEND_INDEX = path.join(FRONTEND_DIST, "index.html");
 // index.html is never cached (so an update shows on the next reload); the
@@ -782,13 +766,13 @@ app.use(express.static(FRONTEND_DIST, {
   },
 }));
 app.get(/^\/(?!api\/|api$|ws$).*/, (req, res, next) => {
-  if (!fs.existsSync(FRONTEND_INDEX)) return req.path === "/" ? res.send("XTS Trading Backend ✅ (dashboard not built — run start.bat)") : next();
+  if (!fs.existsSync(FRONTEND_INDEX)) return req.path === "/" ? res.send("XTS Trading Backend (dashboard not built — run start.bat)") : next();
   res.setHeader("Cache-Control", "no-cache");
   res.sendFile(FRONTEND_INDEX);
 });
 
-// ── Instruments (fetched from Upstox on start; refresh on demand) ──
-// Only the segments the admin allows (Admin → Execution & Limits).
+// Instruments (fetched from Upstox on start; refresh on demand)
+// Only the segments the admin allows (Admin -> Execution & Limits).
 const segKey = seg => { const x = String(seg || "").toUpperCase(); return x === "MCX" ? "MCX_FO" : x; };
 app.get("/api/instruments", (_, res) => {
   const allowed = new Set(settings.getSettings().allowedSegments || []);
@@ -798,7 +782,7 @@ app.get("/api/instruments/status", (_, res) => res.json(getInstrumentStatus()));
 app.post("/api/instruments/refresh", async (req, res) => {
   try {
     const status = await refreshInstruments();
-    console.log(`🔄 Instruments refreshed by ${req.user.username}: ${status.count}`);
+    console.log(`Instruments refreshed by ${req.user.username}: ${status.count}`);
     res.json(status);
   } catch (err) {
     res.status(502).json({ error: err.message, status: getInstrumentStatus() });
@@ -813,7 +797,7 @@ app.post("/api/instruments", async (req, res) => {
     const count = setInstruments(payload, "upload");
     res.json({ success: true, count });
   } catch (err) {
-    console.error("❌ Failed to load uploaded instruments:", err.message);
+    console.error("Error: Failed to load uploaded instruments:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -838,7 +822,7 @@ app.post("/api/clients/:id/login", async (req, res) => {
     res.json({ success: true, status: "logged_in" });
   } catch (err) {
     const body = err.response?.data;
-    console.error(`❌ ${c.id} login HTTP ${err.response?.status || "?"}:`, body ? JSON.stringify(body) : err.message);
+    console.error(`Error: ${c.id} login HTTP ${err.response?.status || "?"}:`, body ? JSON.stringify(body) : err.message);
     res.status(500).json({ error: brokerError(err), status: "login_failed" });
   }
 });
@@ -859,7 +843,7 @@ app.post("/api/clients/login-all", async (req, res) => {
       await brokerLogin(c);
       return { id: c.id, status: "logged_in" };
     } catch (err) {
-      console.error(`❌ ${c.id}:`, brokerError(err));
+      console.error(`Error: ${c.id}:`, brokerError(err));
       return { id: c.id, status: "error", error: brokerError(err) };
     }
   }));
@@ -921,7 +905,7 @@ app.post("/api/unsubscribe", async (req, res) => {
   res.json({ status: "unsubscribed", count: tokens.length });
 });
 
-// ── Automated strategies assigned to the logged-in user ──
+// Automated strategies assigned to the logged-in user
 function ownAssignment(req, res) {
   const a = strategyStore.getAssignment(req.params.id);
   if (!a || a.username !== req.user.username) {
@@ -952,8 +936,8 @@ app.post("/api/strategies/:id/:action(start|stop|squareoff|resume)", (req, res) 
   }
 });
 
-// ── Dashboard activity log → server journal (survives refresh, restart, network loss) ──
-const levelOf = m => (/❌|error|reject|fail|manual check/i.test(m) ? "error" : /⚠|partial|warn|disconnect|halted/i.test(m) ? "warn" : "info");
+// Dashboard activity log -> server journal (survives refresh, restart, network loss)
+const levelOf = m => (/Error: |error|reject|fail|manual check/i.test(m) ? "error" : /Warning: |partial|warn|disconnect|halted/i.test(m) ? "warn" : "info");
 app.post("/api/activity", (req, res) => {
   const entries = req.body?.entries;
   if (!Array.isArray(entries) || entries.length > 500) {
@@ -973,16 +957,14 @@ app.post("/api/activity", (req, res) => {
   res.json({ saved });
 });
 
-// ── Trade book and activity log (own records only); ?format=csv to download ──
+// Trade book and activity log (own records only); ?format=csv to download
 app.get("/api/journal/:kind(trades|events)", (req, res) => {
   sendJournal(req, res, r => r.user === req.user.username, `${req.user.username}-`);
 });
 
-// ─────────────────────────────────────────────────────────────
 // Execute Portfolio — fans out to every enabled + logged-in + connected
 // client visible to the logged-in dashboard user. Guarded by the admin
 // kill switch and risk limits BEFORE anything is sent to the broker.
-// ─────────────────────────────────────────────────────────────
 const executionsInFlight = new Set(); // dashboard usernames with a running execution
 
 app.post("/api/order", async (req, res) => {
@@ -991,7 +973,9 @@ app.post("/api/order", async (req, res) => {
   const { legs } = req.body || {};
 
   if (s.tradingHalted) {
-    return res.status(423).json({ error: `Trading is halted by admin${s.haltReason ? `: ${s.haltReason}` : ""}` });
+    const why = String(s.haltReason || "").trim().replace(/[.\s]+$/, "");
+    const note = why && !/^halted( by (the )?admin)?$/i.test(why) ? ` (reason: ${why})` : "";
+    return res.status(423).json({ error: `Trading is halted by the admin${note}` });
   }
   if (!Array.isArray(legs) || !legs.length) return res.status(400).json({ error: "No legs" });
   if (legs.length > s.limits.maxLegs) {
@@ -1000,7 +984,7 @@ app.post("/api/order", async (req, res) => {
   const allowedSegs = new Set(s.allowedSegments || []);
   for (const [i, leg] of legs.entries()) {
     if (!allowedSegs.has(segKey(leg.segment || "NSE_FO"))) {
-      return res.status(400).json({ error: `Leg ${i + 1}: segment ${segKey(leg.segment)} is not allowed for trading (Admin → Execution & Limits)` });
+      return res.status(400).json({ error: `Leg ${i + 1}: segment ${segKey(leg.segment)} is not allowed for trading (Admin > Execution & Limits)` });
     }
     const lots = Number(leg.lots);
     if (!Number.isInteger(lots) || lots <= 0) {
@@ -1027,7 +1011,7 @@ app.post("/api/order", async (req, res) => {
   }
   executionsInFlight.add(who);
 
-  console.log(`\n🔥 EXECUTE by ${who} | ${legs.length} leg(s) | ${active.length} client(s)`);
+  console.log(`\nEXECUTE by ${who} | ${legs.length} leg(s) | ${active.length} client(s)`);
   journal.appendEvent({
     source: "EXECUTION", level: "info", user: who,
     message: `EXECUTE (${paper ? "PAPER" : "LIVE"}) by ${who}: ${legs.length} leg(s) × ${active.length} client(s) — ` +
@@ -1155,15 +1139,13 @@ app.get("/api/clients/:id/positions", async (req, res) => {
   res.json(positions);
 });
 
-// ─────────────────────────────────────────────────────────────
 // Bootstrap — only when run directly (`node server.js`), so tests can
 // load the app without listening on real ports or logging in anywhere.
-// ─────────────────────────────────────────────────────────────
 async function start() {
   try {
     await refreshInstruments();
   } catch (err) {
-    console.error("❌ Instruments unavailable:", err.message);
+    console.error("Error: Instruments unavailable:", err.message);
   }
   await initClients();
   await bootMarketData();
@@ -1171,10 +1153,10 @@ async function start() {
   // AUTO_LOGIN_ON_START=true: log every enabled client in to the broker and
   // connect it, so running strategies can trade after an unattended restart.
   if (String(process.env.AUTO_LOGIN_ON_START).toLowerCase() === "true") {
-    console.log("🔐 AUTO_LOGIN_ON_START — logging in enabled clients…");
+    console.log("AUTO_LOGIN_ON_START — logging in enabled clients…");
     for (const c of clients.filter(x => x.enabled)) {
       try { await brokerLogin(c); c.isConnected = true; }
-      catch (err) { console.error(`❌ Auto-login ${c.id}: ${brokerError(err)}`); }
+      catch (err) { console.error(`Error: Auto-login ${c.id}: ${brokerError(err)}`); }
     }
   }
 
@@ -1183,13 +1165,13 @@ async function start() {
   startTradeBookLoop();
 
   const httpServer = app.listen(PORT, "0.0.0.0", () => {
-    console.log(`🚀 REST server on port ${PORT}`);
+    console.log(`REST server on port ${PORT}`);
     startWS(httpServer);
   });
 }
 
 if (require.main === module) {
-  start().catch(err => { console.error("❌ Fatal:", err); process.exit(1); });
+  start().catch(err => { console.error("Error: Fatal:", err); process.exit(1); });
 }
 
 module.exports = { app, startWS, start, runner };

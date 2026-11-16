@@ -14,7 +14,7 @@ The structure follows the same professional documentation pattern used by the Sy
 - Instrument master downloaded from Upstox on startup, with a Refresh Instruments button. All segments: NSE/BSE/MCX F&O, NSE/BSE equity, NSE/BSE currency — the admin chooses which ones are tradable.
 - **Global PAPER / LIVE switch** (admin). PAPER is the default: every order, manual or strategy, is simulated on the live feed and nothing reaches the broker.
 - One active login per dashboard user: logging in elsewhere warns, ends the other session, and asks for a fresh login.
-- Lot sizing per client by multiplier or by capital (e.g. base ₹1 Cr → 1x, ₹2 Cr → 2x), plus per-strategy capital allocation per client.
+- Lot sizing per client by multiplier or by capital (e.g. base ₹1 Cr -> 1x, ₹2 Cr -> 2x), plus per-strategy capital allocation per client.
 - Multi-leg portfolio execution across all enabled, logged-in, and connected clients.
 - Marketable limit order execution with retry, timeout, partial-fill, cancel, and order-history handling. Fills that arrive while a cancel is in flight are counted, so a retry never over-fills.
 - Pre-trade risk limits and a global trading halt, enforced on the server before any order is sent.
@@ -50,7 +50,7 @@ XTS 5paisa/
 |   |-- index.js               Marketable limit order execution engine
 |   |-- journal.js             Durable trade book and activity log (JSONL + CSV)
 |   |-- tradebooks.js          Daily broker trade book snapshots per client
-|   |-- margin.js              Broker balance → available / utilized margin
+|   |-- margin.js              Broker balance -> available / utilized margin
 |   |-- strategy/              Strategy loader, runner, option chain, store
 |   |-- fsutil.js              Atomic file writes
 |   |-- package.json           Backend dependencies and scripts
@@ -139,7 +139,7 @@ PORT=5000
 AUTO_LOGIN_ON_START=false
 
 # Optional tuning
-# ORDER_MIN_GAP_MS=110            overrides Admin → Execution & Limits → order gap
+# ORDER_MIN_GAP_MS=110            overrides Admin -> Execution & Limits -> order gap
 # ORDER_POLL_GAP_MS=100
 # MARKET_RELOGIN_BASE_MS=2000     first wait before a market-data re-login
 # MARKET_TAKEOVER_BACKOFF_MS=30000  wait after repeated session takeovers
@@ -282,7 +282,7 @@ Press **Ctrl+Shift+Space** anywhere in the app (login screen or dashboard) and l
 - **Execution & Limits**:
   - **PAPER / LIVE** for the whole system (switching to LIVE asks for confirmation). In PAPER, the dashboard's Execute button and every strategy are simulated on the live feed; strategy assignments set to LIVE run as PAPER.
   - **Segments allowed for trading** and the product type per segment (NRML / MIS / CNC; equity defaults to CNC). Disallowed segments disappear from the dashboard and are refused by the server and the strategy runner.
-  - **Lot sizing per client**: by each client's multiplier, or by capital (client capital ÷ base capital, e.g. base ₹1 Cr: ₹2 Cr → 2x, ₹1.5 Cr → 1.5x). Fractions round down by default (never more than the ratio), or to the nearest lot. A client whose size rounds to 0 lots is skipped and logged.
+  - **Lot sizing per client**: by each client's multiplier, or by capital (client capital / base capital, e.g. base ₹1 Cr: ₹2 Cr -> 2x, ₹1.5 Cr -> 1.5x). Fractions round down by default (never more than the ratio), or to the nearest lot. A client whose size rounds to 0 lots is skipped and logged.
   - The trading kill switch, engine parameters (price buffer, fill timeout, retries, poll interval, cancel wait, order gap) and risk limits (max legs, lots per leg, quantity per order, order value, clients per execution, orders per minute). Limits are checked on the server before any order reaches the broker.
 
 A new install starts in **PAPER** with **trading halted**. LIVE orders need both: mode set to LIVE and trading resumed.
@@ -291,26 +291,26 @@ A new install starts in **PAPER** with **trading halted**. LIVE orders need both
 
 ### Admin: upload and assign
 
-Admin console → **Strategies**:
+Admin console -> **Strategies**:
 
 1. **Upload strategy files** — one or many `bt-strategy-config` v1 exports. Settings the live runner cannot reproduce (target, ORB, delta exit, IV filters, GIFT filters, preset strikes, fixed exit times other than `intraday_at`) are refused with the reason, so a strategy never trades differently from its backtest without anyone noticing. Costs/slippage are backtest-only and ignored.
 2. **Assign** a strategy to a dashboard user: mode (**PAPER** by default, or LIVE), capital (₹ at 1x — what the daily loss % is measured against), and optionally which of that user's clients it trades (default: all of them). Several users can run the same strategy, and the same client can trade under several users' strategies — each assignment keeps its own positions.
-3. **Allocations** (optional, per assignment): the capital each client gives this strategy. That client's lots = strategy lots × allocation ÷ the strategy capital (e.g. strategy capital ₹1 Cr, allocation ₹50 L → half the lots, rounded per the sizing rule). Blank = the client's normal sizing; 0 = the client sits this strategy out. A summary table shows each client's total allocation against its capital and flags over-allocation.
+3. **Allocations** (optional, per assignment): the capital each client gives this strategy. That client's lots = strategy lots × allocation / the strategy capital (e.g. strategy capital ₹1 Cr, allocation ₹50 L -> half the lots, rounded per the sizing rule). Blank = the client's normal sizing; 0 = the client sits this strategy out. A summary table shows each client's total allocation against its capital and flags over-allocation.
 4. Watch and control every assignment (start, stop, square off, resume, enable/disable) and read everyone's trade book and activity log.
 
 ### User: start
 
-Dashboard → **Automated Strategies** → **Start**. The strategy then runs inside the backend — the browser can be closed:
+Dashboard -> **Automated Strategies** -> **Start**. The strategy then runs inside the backend — the browser can be closed:
 
 - **Entry days** come from `entry_days.dte`, counted in trading days to the chosen expiry (`current_week`, `next_week` or `monthly`) from the instrument master. A 0-DTE strategy started the day before expiry shows "Armed — next entry day …" and fires on expiry day.
 - **Entries** fire once per schedule slot (IST). Slots that passed while the strategy was not running (late start, restart, downtime) are skipped, never fired late. Each leg group (`legs` and each `structures[]` entry) has its own schedule; the main symbol and every `extra_symbols` entry (e.g. NIFTY + SENSEX) trade on their own expiry days.
-- **Strikes** by delta (Black-76 on the forward implied by put-call parity, using live quotes), ATM offset, or premium. `nearest_ge` picks the furthest strike whose |delta| is still ≥ the target. If no strike fits (none on that side of the target, or none within `tolerance`), the strike whose delta is nearest the target is taken instead, and the activity log says so ("took the nearest strike …"). The premium rule works the same way.
+- **Strikes** by delta (Black-76 on the forward implied by put-call parity, using live quotes), ATM offset, or premium. `nearest_ge` picks the furthest strike whose |delta| is still >= the target. If no strike fits (none on that side of the target, or none within `tolerance`), the strike whose delta is nearest the target is taken instead, and the activity log says so ("took the nearest strike …"). The premium rule works the same way.
 - **Quantity** = leg lots × `lots_per_entry` × lot size × the client's factor (its allocation ratio if set, otherwise the global sizing: multiplier or capital), rounded to whole lots.
 - **Stops**: `per_leg` multiplier — a short leg is bought back when its LTP reaches entry × multiplier.
-- **Daily loss**: when a client's P&L for the day reaches −(capital × multiplier × max_loss_pct), that client's positions are squared off and it takes no more entries that day.
+- **Daily loss**: when a client's P&L for the day reaches -(capital × multiplier × max_loss_pct), that client's positions are squared off and it takes no more entries that day.
 - **Exit**: held to expiry and settled at the last traded price at 15:30 IST, or squared off at `exit.intraday_at`.
 - **Stop** = no new entries, open positions stay protected by their stops. **Square off** closes everything now.
-- **PAPER** goes through the same marketable-limit engine (buffer, timeout, cancel, retry) against a simulated broker that fills at the live bid/ask, sends nothing to the broker, and gives every simulated order a `PAPER-YYYYMMDD-XXXXXX` ID. **LIVE** uses the real broker and is blocked while trading is halted or the global mode is PAPER (exits still run). An order needing a manual check pauses the strategy.
+- **PAPER** goes through the same marketable-limit engine (buffer, timeout, cancel, retry) against a simulated broker that fills at the live bid/ask, sends nothing to the broker, and gives every simulated order a `PAPER-YYYYMMDD-XXXXXX` ID. **LIVE** uses the real broker and is blocked while trading is halted or the global mode is PAPER (exits still run). Both PAPER and LIVE skip an entry when market data is not live (no new tick for 2 minutes), so PAPER never fills on old prices. An order needing a manual check pauses the strategy.
 
 Each client card has **Algo Pos** (that client's PAPER strategy positions with entry/exit order IDs, LTP, stop and P&L) and **Algo Orders** (every PAPER strategy order today, by PAPER order ID). LIVE strategy trades are real broker orders, so they appear only in the card's Orders / Trades / Positions views (the broker's own books); the Automated Strategies panel still lists every position of a strategy, PAPER or LIVE.
 
@@ -323,11 +323,11 @@ Each client card has **Algo Pos** (that client's PAPER strategy positions with e
 
 ### Order safety
 
-Every broker request passes a per-client guard: orders for one client go out one at a time at least 110 ms apart (Admin → Execution & Limits → order gap, or `ORDER_MIN_GAP_MS`; the broker allows 10 orders/s), different clients in parallel, status polls at least 100 ms apart (`ORDER_POLL_GAP_MS`), and more than **Max orders per minute, per client** (Admin → Execution & Limits, default 60) is refused before reaching the broker and pauses every strategy using that client.
+Every broker request passes a per-client guard: orders for one client go out one at a time at least 110 ms apart (Admin -> Execution & Limits -> order gap, or `ORDER_MIN_GAP_MS`; the broker allows 10 orders/s), different clients in parallel, status polls at least 100 ms apart (`ORDER_POLL_GAP_MS`), and more than **Max orders per minute, per client** (Admin -> Execution & Limits, default 60) is refused before reaching the broker and pauses every strategy using that client.
 
 ## Parent and Child Client Setup
 
-Open the Admin console → Clients.
+Open the Admin console -> Clients.
 
 Parent client requirements:
 
@@ -367,7 +367,7 @@ The parent provides market data access. The parent and every child can participa
 6. Each client's lots = leg lots × its sizing factor (multiplier or capital ratio), in whole lots.
 7. The execution engine places marketable limit orders priced to the instrument's own tick size, waits for the fill pushed over the Interactive order socket (falling back to polling the order history), cancels unfilled remainders, waits for the cancel to be confirmed, and retries only the quantity that is genuinely unfilled. PAPER runs the same steps against the simulated broker.
 8. If an order's placement times out, or a cancel is not confirmed, the result is **MANUAL_CHECK** and nothing is retried automatically. Check the broker's order book.
-9. Every result records latency: queue (waiting for the order gap), ack (send → order ID), fill (order ID → filled) and total.
+9. Every result records latency: queue (waiting for the order gap), ack (send -> order ID), fill (order ID -> filled) and total.
 
 The active client rule is:
 

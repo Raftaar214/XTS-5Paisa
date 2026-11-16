@@ -32,7 +32,7 @@ function dateOf(expiry) {
   return Number.isFinite(ms) ? parts(ms).date : null;
 }
 
-// "HH:MM" → minutes after midnight
+// "HH:MM" -> minutes after midnight
 function toMinutes(hhmm) {
   const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm || ""));
   if (!m) return null;

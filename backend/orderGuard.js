@@ -1,10 +1,10 @@
 // orderGuard.js — keeps broker traffic calm and bounded, per client.
 //
-//   • Orders (place / cancel) for the same client go out one at a time,
-//     at least `minGapMs` apart (default 110 ms ≈ 9/s; the broker allows
+//   - Orders (place / cancel) for the same client go out one at a time,
+//     at least `minGapMs` apart (default 110 ms ~ 9/s; the broker allows
 //     10 orders/s for non-algo apps), so a burst never trips the broker limit.
-//   • Order-status polls are spaced at least `pollGapMs` apart.
-//   • Circuit breaker: more than `maxOrdersPerMinute` orders for one client
+//   - Order-status polls are spaced at least `pollGapMs` apart.
+//   - Circuit breaker: more than `maxOrdersPerMinute` orders for one client
 //     inside 60 s is refused BEFORE it reaches the broker. The refusal looks
 //     like a broker rejection (HTTP 429), so the execution engine treats it
 //     as definite — never as an unknown outcome — and `onTrip` lets the
@@ -20,8 +20,8 @@ function createOrderGuard({
   getMaxPerMinute = () => 0,
   onTrip = () => {},
 } = {}) {
-  const lanes = new Map();   // `${kind}:${clientId}` → { nextAt, chain }
-  const sent  = new Map();   // clientId → [timestamps of orders in the last minute]
+  const lanes = new Map();   // `${kind}:${clientId}` -> { nextAt, chain }
+  const sent  = new Map();   // clientId -> [timestamps of orders in the last minute]
 
   function lane(key, gapMs) {
     let l = lanes.get(key);
@@ -72,14 +72,14 @@ function createOrderGuard({
   return { beforeOrder, beforePoll, stats };
 }
 
-// Shared instance used by xtsApi.js. Limits come from Admin → Execution & Limits.
+// Shared instance used by xtsApi.js. Limits come from Admin -> Execution & Limits.
 let shared = null;
 const tripListeners = new Set();
 function getSharedGuard() {
   if (!shared) {
     const settings = require("./settings");
     shared = createOrderGuard({
-      // Admin → Execution & Limits → order spacing (ORDER_MIN_GAP_MS overrides)
+      // Admin -> Execution & Limits -> order spacing (ORDER_MIN_GAP_MS overrides)
       minGapMs:  () => Number(process.env.ORDER_MIN_GAP_MS || settings.getSettings().engine.orderGapMs || 110),
       pollGapMs: Number(process.env.ORDER_POLL_GAP_MS || 100),
       getMaxPerMinute: () => settings.getSettings().limits.maxOrdersPerMinute,

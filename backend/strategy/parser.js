@@ -9,7 +9,7 @@
 
 const ist = require("./ist");
 
-// data_source prefix → underlying + F&O segment in the instrument master
+// data_source prefix -> underlying + F&O segment in the instrument master
 const UNDERLYINGS = {
   nifty:      { underlying: "NIFTY",      segment: "NSE_FO" },
   banknifty:  { underlying: "BANKNIFTY",  segment: "NSE_FO" },
@@ -53,11 +53,11 @@ function parseSchedule(list, errors, where) {
     const end   = ist.toMinutes(w.end);
     const every = Number(w.every_min);
     if (start == null || end == null || !(every > 0) || end < start) {
-      errors.push(`${where}: schedule[${i}] needs start ≤ end (HH:MM) and every_min > 0`);
+      errors.push(`${where}: schedule[${i}] needs start <= end (HH:MM) and every_min > 0`);
       return;
     }
     if (start < ist.MARKET_OPEN || end > ist.MARKET_CLOSE) {
-      errors.push(`${where}: schedule[${i}] ${w.start}–${w.end} is outside market hours (09:15–15:30 IST)`);
+      errors.push(`${where}: schedule[${i}] ${w.start}-${w.end} is outside market hours (09:15-15:30 IST)`);
       return;
     }
     for (let t = start; t <= end; t += every) slots.add(ist.fromMinutes(t));
@@ -127,7 +127,7 @@ function parseStrategyFile(raw) {
   const s = raw.strategy;
   if (!s || typeof s !== "object") return { ok: false, errors: ["File has no strategy section"], warnings };
 
-  // ── features the live runner does not implement ──
+  // features the live runner does not implement
   requireNone(s.orb, "orb", errors);
   requireNone(s.gift_cr, "gift_cr", errors);
   requireNone(s.gift_flow, "gift_flow", errors);
@@ -138,7 +138,7 @@ function parseStrategyFile(raw) {
     requireNone(s.entry_filter.atm_iv_max, "entry_filter.atm_iv_max", errors);
   }
 
-  // ── symbols ──
+  // symbols
   const symbols = [];
   const main = resolveSource(s.data_source, s.underlying, errors, "strategy");
   const lotsPerEntry = Number(s.lots_per_entry || 1);
@@ -155,7 +155,7 @@ function parseStrategyFile(raw) {
     symbols.push({ ...src, lotsPerEntry: lpe, marginPerQty: x.margin_per_qty ?? null, capital: x.capital ?? null });
   });
 
-  // ── leg groups: main legs + structures, each with its own schedule ──
+  // leg groups: main legs + structures, each with its own schedule
   const groups = [{ id: "main", legs: parseLegs(s.legs, errors, "legs"), slots: parseSchedule(s.schedule, errors, "schedule") }];
   (Array.isArray(s.structures) ? s.structures : []).forEach((st, i) => {
     groups.push({
@@ -165,7 +165,7 @@ function parseStrategyFile(raw) {
     });
   });
 
-  // ── when to trade ──
+  // when to trade
   const dte = s.entry_days?.dte;
   const entryDte = Array.isArray(dte) ? dte.map(Number) : [];
   if (!entryDte.length || entryDte.some(d => !Number.isInteger(d) || d < 0 || d > 30)) {
@@ -178,7 +178,7 @@ function parseStrategyFile(raw) {
   const expiryWhich = s.expiry?.which || "current_week";
   if (!EXPIRY_CHOICES.includes(expiryWhich)) errors.push(`expiry "${expiryWhich}" is not supported (use ${EXPIRY_CHOICES.join(", ")})`);
 
-  // ── exits ──
+  // exits
   const stopMode = s.stop?.mode || "none";
   let stop = { mode: "none" };
   if (stopMode === "per_leg") {
@@ -205,7 +205,7 @@ function parseStrategyFile(raw) {
   }
   if (hold === "intraday" && !intradayAt) errors.push('exit.hold "intraday" needs exit.intraday_at');
 
-  // ── backtest-only settings ──
+  // backtest-only settings
   if (s.costs) warnings.push("costs / slippage / fill model are backtest settings and are not used live");
   if (!isNil(s.fill_buffer_min)) warnings.push("fill_buffer_min is a backtest setting and is not used live");
 

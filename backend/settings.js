@@ -36,7 +36,7 @@ const LIMIT_RANGES = {
   maxOrdersPerMinute: [0, 600],
 };
 
-// Instrument-master segments a dashboard may trade (Admin → Execution & Limits).
+// Instrument-master segments a dashboard may trade (Admin -> Execution & Limits).
 const ALL_SEGMENTS = ["NSE_FO", "BSE_FO", "MCX_FO", "NSE_EQ", "BSE_EQ", "NCD_FO", "BCD_FO"]; // NSE_COM: no XTS segment
 const PRODUCT_TYPES = ["NRML", "MIS", "CNC"];
 
@@ -45,7 +45,7 @@ const DEFAULTS = {
   // LIVE:  manual orders go to the broker; strategies follow their own mode.
   tradingMode: "PAPER",
   tradingHalted: true,
-  haltReason: "New install — enable trading from the Admin console when ready.",
+  haltReason: "New install",
   engine: {
     bufferPct: 0.5,
     fillTimeout: 4,
@@ -53,13 +53,13 @@ const DEFAULTS = {
     pollInterval: 0.5,
     cancelTimeout: 5,
     retryDelay: 2,
-    orderGapMs: 110,   // ≈ 9 orders/s per client — under the broker limit of 10/s
+    orderGapMs: 110,   // ~ 9 orders/s per client — under the broker limit of 10/s
   },
   allowedSegments: ["NSE_FO", "BSE_FO", "MCX_FO"],
   products: { NSE_EQ: "CNC", BSE_EQ: "CNC", default: "NRML" },
   // How many lots each client trades for one lot of a leg:
   //   multiplier — the client's Multiplier × (parent 1x)
-  //   capital    — client capital ÷ baseCapital (e.g. ₹2 Cr ÷ ₹1 Cr = 2 lots)
+  //   capital    — client capital / baseCapital (e.g. ₹2 Cr / ₹1 Cr = 2 lots)
   // Fractions are rounded (floor = never more than the ratio allows).
   sizing: { mode: "multiplier", baseCapital: 10000000, rounding: "floor" },
   limits: {
@@ -93,7 +93,7 @@ function load() {
       return;
     }
   } catch (err) {
-    console.error("⚠️  Could not read data/settings.json — using safe defaults (trading halted):", err.message);
+    console.error("Warning: Could not read data/settings.json — using safe defaults (trading halted):", err.message);
     settings = clone(DEFAULTS);
     return;
   }
@@ -106,7 +106,7 @@ function persist() {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
     fs.writeFileSync(DATA_FILE, JSON.stringify(settings, null, 2));
   } catch (err) {
-    console.error("⚠️  Could not write data/settings.json:", err.message);
+    console.error("Warning: Could not write data/settings.json:", err.message);
   }
 }
 
@@ -161,7 +161,7 @@ function updateSettings(patch = {}) {
   }
   if (patch.tradingHalted !== undefined) {
     next.tradingHalted = Boolean(patch.tradingHalted);
-    next.haltReason = next.tradingHalted ? String(patch.haltReason || "Halted by admin").slice(0, 200) : "";
+    next.haltReason = next.tradingHalted ? String(patch.haltReason || "").slice(0, 200) : "";
   }
   Object.assign(next.engine, engine);
   Object.assign(next.limits, limits);

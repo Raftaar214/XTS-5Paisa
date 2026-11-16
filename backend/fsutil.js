@@ -47,7 +47,7 @@ function readJson(file, fallback) {
     if (!fs.existsSync(file)) return fallback;
     return JSON.parse(fs.readFileSync(file, "utf8"));
   } catch (err) {
-    console.error(`⚠️  Could not read ${file}: ${err.message}`);
+    console.error(`Warning: Could not read ${file}: ${err.message}`);
     return fallback;
   }
 }

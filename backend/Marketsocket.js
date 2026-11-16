@@ -12,7 +12,7 @@
 // (another running copy of this backend, or another app) — it says so and
 // backs off instead of fighting it.
 //
-// Credentials come from the PARENT client (Admin → Clients), falling back to
+// Credentials come from the PARENT client (Admin -> Clients), falling back to
 // MARKET_APP_KEY / MARKET_SECRET_KEY in .env when no parent exists yet.
 
 const axios = require("axios");
@@ -29,9 +29,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const TAKEOVER_BACKOFF_MS = Number(process.env.MARKET_TAKEOVER_BACKOFF_MS || 30_000);
 const RELOGIN_BASE_MS     = Number(process.env.MARKET_RELOGIN_BASE_MS || 2000);
 
-// ─────────────────────────────────────────────────────────────
 // State
-// ─────────────────────────────────────────────────────────────
 let marketToken  = null;
 let marketUserID = null;
 let socket       = null;
@@ -39,15 +37,16 @@ let joined       = false;
 let MARKET_BASE  = BASE_DEFAULT;
 let subPath      = null;               // which subscription URL works (found on first call)
 
-const liveQuotes    = {};              // token → { bid, ask, ltp, hasData, ts }
-const subscribedMap = new Map();       // token → { xtsSegmentCode }
-const owners        = new Map();       // token → Set(owner)  ("ui:<user>", "positions", "strategy:<id>")
+const liveQuotes    = {};              // token -> { bid, ask, ltp, hasData, ts }
+const subscribedMap = new Map();       // token -> { xtsSegmentCode }
+const owners        = new Map();       // token -> Set(owner)  ("ui:<user>", "positions", "strategy:<id>")
 
 const quoteListeners = new Set();
 function notify(update) { quoteListeners.forEach(fn => { try { fn(update); } catch (_) {} }); }
 
 const stats = {
   ticks: 0, ticksLastMinute: 0, lastTickAt: 0,
+  otherTicks: 0,                       // ticks for tokens we did not subscribe (another login on the same key)
   recoveries: [],                      // timestamps of re-logins (last 5 min)
   lastError: "", takeoverWarnedAt: 0,
 };
@@ -55,9 +54,7 @@ let heartbeatTimer = null;
 
 const isInvalidToken = d => d?.code === "e-session-0007" || /invalid token/i.test(String(d?.description || ""));
 
-// ─────────────────────────────────────────────────────────────
 // LOGIN
-// ─────────────────────────────────────────────────────────────
 async function loginMarketData() {
   const parent = getParent();
   const APP_KEY    = (parent?.marketKey    || process.env.MARKET_APP_KEY    || process.env.CLI1_INTERACTIVE_KEY    || "").trim();
@@ -65,7 +62,7 @@ async function loginMarketData() {
   MARKET_BASE = parent?.rootUrl || BASE_DEFAULT;
 
   if (!APP_KEY || !SECRET_KEY) {
-    console.warn("⚠️  Missing Market Data API Key/Secret — add a Parent client in the Admin console (or MARKET_APP_KEY / MARKET_SECRET_KEY in .env).");
+    console.warn("Warning: Missing Market Data API Key/Secret — add a Parent client in the Admin console (or MARKET_APP_KEY / MARKET_SECRET_KEY in .env).");
     return null;
   }
 
@@ -79,7 +76,7 @@ async function loginMarketData() {
       if (data.type === "success") {
         marketToken  = data.result.token;
         marketUserID = data.result.userID;
-        console.log(`✅ Market Data logged in (source=${source}, userID=${marketUserID})`);
+        console.log(`Market Data logged in (source=${source}, userID=${marketUserID})`);
         return marketToken;
       }
       stats.lastError = `[${data.code}] ${data.description}`;
@@ -89,13 +86,11 @@ async function loginMarketData() {
       console.warn(`   Market Data login source=${source} failed: ${stats.lastError}`);
     }
   }
-  console.error("❌ Market Data login failed.");
+  console.error("Error: Market Data login failed.");
   return null;
 }
 
-// ─────────────────────────────────────────────────────────────
 // SOCKET — tick stream
-// ─────────────────────────────────────────────────────────────
 function closeSocket() {
   joined = false;
   if (!socket) return;
@@ -104,13 +99,15 @@ function closeSocket() {
 }
 
 function onTick(raw) {
-  stats.ticks++;
   const data = typeof raw === "string" ? (() => { try { return JSON.parse(raw); } catch { return raw; } })() : raw;
-  parseQuote(data);
+  const q = parseQuote(data);
+  // Count only our own tokens; the rest belong to another session on this user ID.
+  if (q && subscribedMap.has(String(q.token))) stats.ticks++;
+  else stats.otherTicks++;
 }
 
 function connectMarketSocket() {
-  if (!marketToken) { console.warn("⚠️  No market token — socket skipped."); return; }
+  if (!marketToken) { console.warn("Warning: No market token — socket skipped."); return; }
   closeSocket();
 
   socket = io(MARKET_BASE, {
@@ -125,7 +122,7 @@ function connectMarketSocket() {
 
   let joinFallback = null;
   socket.on("connect", () => {
-    console.log("✅ Market Data socket connected");
+    console.log("Market Data socket connected");
     // Subscribe once the broker confirms the join; fall back after 2 s.
     clearTimeout(joinFallback);
     joinFallback = setTimeout(() => { if (!joined) { joined = true; resubscribeAll(); } }, 2000);
@@ -136,7 +133,7 @@ function connectMarketSocket() {
   });
   socket.on("disconnect", reason => {
     joined = false;
-    console.warn(`🔴 Market Data socket disconnected: ${reason}`);
+    console.warn(`Market Data socket disconnected: ${reason}`);
     // The broker closed it (session ended / taken over): socket.io will not
     // retry this case, so log in again. Other reasons reconnect by themselves.
     if (reason === "io server disconnect") recover("the broker closed the market-data session");
@@ -149,8 +146,11 @@ function connectMarketSocket() {
   if (!heartbeatTimer) {
     heartbeatTimer = setInterval(() => {
       stats.ticksLastMinute = stats.ticks;
+      const other = stats.otherTicks;
       stats.ticks = 0;
-      console.log(`📈 Market data: ${stats.ticksLastMinute} tick(s)/min | ${subscribedMap.size} token(s) | socket ${socket?.connected ? (joined ? "live" : "joining") : "down"}`);
+      stats.otherTicks = 0;
+      console.log(`Market data: ${stats.ticksLastMinute} tick(s)/min | ${subscribedMap.size} token(s) | socket ${socket?.connected ? (joined ? "live" : "joining") : "down"}` +
+        (other ? ` | ${other} other tick(s) ignored (another login on this key)` : ""));
     }, 60_000);
     heartbeatTimer.unref?.();
   }
@@ -167,26 +167,24 @@ function recover(reason) {
     if (stats.recoveries.length >= 3) {
       if (now - stats.takeoverWarnedAt > 5 * 60_000) {
         stats.takeoverWarnedAt = now;
-        console.error("⚠️  The market-data session keeps being taken over. Another login is using the SAME Market Data API key " +
+        console.error("Warning: The market-data session keeps being taken over. Another login is using the SAME Market Data API key " +
           "(another running copy of this backend, or another app/script). Only one can stay connected — stop the other one. Retrying in 30 s.");
       }
       await sleep(TAKEOVER_BACKOFF_MS);
     }
-    console.warn(`♻️  Market data: ${reason} — logging in again`);
+    console.warn(`Market data: ${reason} — logging in again`);
     closeSocket();
     marketToken = null;
     for (let i = 0; i < 6 && !marketToken; i++) {
       if (await loginMarketData()) break;
       await sleep(Math.min(30_000, RELOGIN_BASE_MS * 2 ** i));
     }
-    if (marketToken) connectMarketSocket();   // "joined" → resubscribeAll()
+    if (marketToken) connectMarketSocket();   // "joined" -> resubscribeAll()
   })().finally(() => { recovering = null; });
   return recovering;
 }
 
-// ─────────────────────────────────────────────────────────────
 // SUBSCRIPTION (REST) — POST subscribe / PUT unsubscribe
-// ─────────────────────────────────────────────────────────────
 function instrumentsFor(tokens) {
   return tokens.map(t => ({
     exchangeSegment: Number(subscribedMap.get(t)?.xtsSegmentCode || getSegmentForToken(t).xtsSegmentCode),
@@ -237,11 +235,11 @@ async function resubscribeAll() {
   if (!tokens.length || !marketToken) return;
   try {
     await sendSubscription("post", tokens);
-    console.log(`📡 Subscribed ${tokens.length} token(s) on the market-data session`);
+    console.log(`Subscribed ${tokens.length} token(s) on the market-data session`);
   } catch (err) {
     if (err.invalidToken) return recover("the market-data token was rejected");
     stats.lastError = err.message;
-    console.warn(`⚠️  Re-subscribe failed: ${err.message}`);
+    console.warn(`Warning: Re-subscribe failed: ${err.message}`);
   }
 }
 
@@ -269,7 +267,7 @@ async function subscribeTokens(tokens, segmentsArray, owner = "ui") {
   } catch (err) {
     if (err.invalidToken) { recover("the market-data token was rejected"); return; }
     stats.lastError = err.message;
-    console.warn(`⚠️  Subscribe ${fresh.join(",")} failed: ${err.message}`);
+    console.warn(`Warning: Subscribe ${fresh.join(",")} failed: ${err.message}`);
   }
 }
 
@@ -305,13 +303,11 @@ async function unsubscribeTokens(tokens, owner = "ui") {
     // instrumentsFor() falls back to the instrument master for the segment.
     await sendSubscription("put", release);
   } catch (err) {
-    if (!err.invalidToken) console.warn(`⚠️  Unsubscribe ${release.join(",")} failed at the broker: ${err.message}`);
+    if (!err.invalidToken) console.warn(`Warning: Unsubscribe ${release.join(",")} failed at the broker: ${err.message}`);
   }
 }
 
-// ─────────────────────────────────────────────────────────────
 // PARSE BID / ASK / LTP
-// ─────────────────────────────────────────────────────────────
 function parseQuote(raw) {
   try {
     if (raw && typeof raw === "object") {
@@ -365,9 +361,7 @@ function _emit(token, bid, ask, ltp = 0) {
   notify({ [token]: liveQuotes[token] });
 }
 
-// ─────────────────────────────────────────────────────────────
 // Helpers / status
-// ─────────────────────────────────────────────────────────────
 function xtsSegCode(seg) {
   const m = {
     NSECM: 1, NSEFO: 2, NSECD: 3, BSECM: 11, BSEFO: 12, BSECD: 13, MCXFO: 51, NCDEX: 21,
