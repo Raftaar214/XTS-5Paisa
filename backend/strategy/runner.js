@@ -409,7 +409,6 @@ function createRunner(deps) {
     for (const leg of group.legs) {
       const pick = chainLib.selectStrike(chain, quotes, { F, T, r, atm }, leg.type, leg.strike);
       if (!pick.ok) { event(a, s, "warn", `${label}: ${pick.reason} — whole entry skipped`); return; }
-      if (pick.fallback) event(a, s, "warn", `${label}: ${pick.note}`);
       picks.push({ leg, pick, lots: leg.lots * sym.lotsPerEntry });
     }
 

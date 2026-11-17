@@ -125,23 +125,20 @@ test("no quotes means no pick", () => {
   assert.strictEqual(none.ok, false);
 });
 
-test("a delta no strike can reach takes the nearest strike, marked as a fallback", () => {
+test("a delta no strike can reach within the tolerance means no pick (as the strategy file says)", () => {
   const chain = chainLib.buildChain(makeInstruments(), "NIFTY", "NSE_FO", EXPIRY, EXPIRY);
-  const quotes = makeQuotes(chain);
-  const far = chainLib.selectStrike(chain, quotes, { F, T, r: R }, "CE", { rule: "delta", delta: 0.001, match: "nearest_le", minPremium: 0, tolerance: 0.0001 });
-  assert.ok(far.ok, far.reason);
-  assert.strictEqual(far.fallback, true);
-  // the lowest-delta CE in the chain is the nearest to 0.001
-  const lowest = chainLib.selectStrike(chain, quotes, { F, T, r: R }, "CE", { rule: "delta", delta: 0, match: "nearest", minPremium: 0 });
-  assert.strictEqual(far.strike, lowest.strike);
-  assert.match(far.note, /nearest strike/);
+  const far = chainLib.selectStrike(chain, makeQuotes(chain), { F, T, r: R }, "CE", { rule: "delta", delta: 0.001, match: "nearest_le", minPremium: 0, tolerance: 0.0001 });
+  assert.strictEqual(far.ok, false);
+  assert.match(far.reason, /as the strategy file requires/);
 });
 
-test("an in-tolerance pick is not marked as a fallback", () => {
+test("nearest_ge never picks a delta below the target, even if it is closer", () => {
   const chain = chainLib.buildChain(makeInstruments(), "NIFTY", "NSE_FO", EXPIRY, EXPIRY);
-  const pick = chainLib.selectStrike(chain, makeQuotes(chain), { F, T, r: R }, "CE", { rule: "delta", delta: 20, match: "nearest_ge", minPremium: 0, tolerance: 5 });
-  assert.ok(pick.ok);
-  assert.ok(!pick.fallback);
+  const quotes = makeQuotes(chain, 0.14);
+  // no tolerance: the closest strike at or above 20 is taken, never the 16-delta one below
+  const pick = chainLib.selectStrike(chain, quotes, { F, T, r: R }, "CE", { rule: "delta", delta: 20, match: "nearest_ge", minPremium: 0 });
+  assert.ok(pick.ok, pick.reason);
+  assert.ok(pick.delta >= 20, `took delta ${pick.delta}`);
 });
 
 test("strikes needing quotes: a window around the money", () => {
@@ -150,23 +147,11 @@ test("strikes needing quotes: a window around the money", () => {
   assert.strictEqual(tokens.length, 11 * 2);
 });
 
-test("when the strike gap jumps past the tolerance, the strike with the nearest delta is taken", () => {
+test("when the strike gap jumps past the tolerance, the entry is skipped and the log names both neighbours", () => {
   const chain = chainLib.buildChain(makeInstruments(), "NIFTY", "NSE_FO", EXPIRY, EXPIRY);
-  const quotes = makeQuotes(chain, 0.14);
-  const ctx = { F, T, r: R };
-  // at 14% vol the deltas go 55 -> 34 -> 16: nothing within 20 ± 5 that is >= 20
-  const pick = chainLib.selectStrike(chain, quotes, ctx, "CE",
+  // like 17-11 09:20: the delta >= 20 strike is above 25, the next one is below 20
+  const pick = chainLib.selectStrike(chain, makeQuotes(chain, 0.14), { F, T, r: R }, "CE",
     { rule: "delta", delta: 20, match: "nearest_ge", minPremium: 0, tolerance: 5 });
-  assert.ok(pick.ok, pick.reason);
-  assert.strictEqual(pick.fallback, true);
-  assert.ok(pick.delta < 20, `took delta ${pick.delta}`);
-  // no other CE has a delta closer to 20
-  const strikes = chain.strikes.filter(k => chain.byStrike[k].CE);
-  for (const k of strikes) {
-    const iv = greeks.impliedVol(chainLib.mid(quotes[chain.byStrike[k].CE.token]), F, k, T, R, "CE");
-    if (iv == null) continue;
-    const d = Math.abs(greeks.delta(F, k, T, iv, R, "CE")) * 100;
-    assert.ok(Math.abs(d - 20) >= Math.abs(pick.delta - 20) - 1e-9, `strike ${k} delta ${d} is nearer than ${pick.delta}`);
-  }
-  assert.match(pick.note, /took the nearest strike/);
+  assert.strictEqual(pick.ok, false, "neither neighbour is allowed by the file");
+  assert.match(pick.reason, /delta 20 or more \(tolerance 5\) as the strategy file requires — closest: \d+ delta [\d.]+, \d+ delta [\d.]+/);
 });

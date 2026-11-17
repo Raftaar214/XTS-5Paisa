@@ -434,6 +434,9 @@ function _emit(token, bid, ask, ltp = 0, sizes = {}) {
   if (!subscribedMap.has(token)) return;             // never publish unsubscribed tokens
 
   const now = Date.now();
+  // The feed is alive whenever the broker sends a tick for one of our tokens,
+  // changed or not (lastTickAt drives the "market data is live" check).
+  stats.lastTickAt = now;
   const prev = liveQuotes[token];
   if (prev && prev.bid === bid && prev.ask === ask && prev.ltp === ltp) { // nothing changed
     prev.seen = now;
@@ -446,7 +449,6 @@ function _emit(token, bid, ask, ltp = 0, sizes = {}) {
     bid, ask, ltp, hasData: true, ts: now, seen: now,
     bidQty: sizes.bidQty ?? prev?.bidQty ?? null, askQty: sizes.askQty ?? prev?.askQty ?? null,
   };
-  stats.lastTickAt = now;
   notify({ [token]: liveQuotes[token] });
 }
 

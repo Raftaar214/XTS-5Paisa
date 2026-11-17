@@ -155,6 +155,16 @@ test("an unchanged tick still marks the price as fresh, and carries the size at 
   assert.strictEqual(md.isFresh("999", 60_000), false, "never seen");
 });
 
+test("an unchanged tick keeps the feed counted as live (not only price changes)", async () => {
+  const tick = () => sockets.at(-1).emit("1501-json-full", JSON.stringify({ ExchangeInstrumentID: 101,
+    Touchline: { BidInfo: { Price: 12, Size: 300 }, AskInfo: { Price: 12.5, Size: 150 }, LastTradedPrice: 12.2 } }));
+  tick();
+  await wait(120);
+  assert.ok(md.getMarketStatus().lastTickAgeMs >= 100);
+  tick();                                              // exactly the same price as before
+  assert.ok(md.getMarketStatus().lastTickAgeMs < 50, "the repeat tick refreshed the live time");
+});
+
 test("a subscribe call that fails for a non-session reason is retried until it works", async () => {
   broker.subFails = 2;
   await md.subscribeTokens(["104"], ["NSE_FO"], "ui:a");

@@ -109,19 +109,27 @@ function forward(chain, quotes, spotGuess, T, r) {
   return { F: spotGuess, atm };
 }
 
-// Best candidate for the rule. When nothing fits (no strike on the required side
-// of the target, or the best one is outside the tolerance) the strike whose value
-// is nearest the target is taken instead, marked `fallback` so it gets logged.
+// Best candidate exactly as the strategy file defines it (same as the
+// backtest): nearest_ge = closest value at or above the target, nearest_le =
+// closest at or below, nearest = closest either side; and, when a tolerance is
+// set, no further than that from the target. Nothing fits -> null (the entry is
+// skipped) — never a strike the file does not allow.
 function pickBy(cands, value, target, match, tolerance) {
   const dist = c => Math.abs(value(c) - target);
-  const byDist = list => [...list].sort((a, b) => dist(a) - dist(b) || value(a) - value(b));
   let pool = cands;
   if (match === "nearest_ge") pool = cands.filter(c => value(c) >= target - 1e-9);
   if (match === "nearest_le") pool = cands.filter(c => value(c) <= target + 1e-9);
-  const best = byDist(pool)[0];
-  if (best && (tolerance == null || dist(best) <= tolerance)) return { best, fallback: false };
-  const nearest = byDist(cands)[0];
-  return nearest ? { best: nearest, fallback: true } : null;
+  const best = [...pool].sort((a, b) => dist(a) - dist(b) || value(a) - value(b))[0];
+  if (!best) return null;
+  if (tolerance != null && dist(best) > tolerance + 1e-9) return null;
+  return best;
+}
+
+// For the log when nothing fits: the closest strike below and above the target.
+function neighbours(cands, value, target) {
+  const below = cands.filter(c => value(c) < target).sort((a, b) => value(b) - value(a))[0];
+  const above = cands.filter(c => value(c) >= target).sort((a, b) => value(a) - value(b))[0];
+  return [above, below].filter(Boolean);
 }
 
 // Choose the strike for one leg. Returns { ok, strike, token, delta, premium, … }
@@ -155,18 +163,17 @@ function selectStrike(chain, quotes, ctx, type, spec) {
   if (!cands.length) return { ok: false, reason: `no ${type} quotes in the chain` };
 
   const byPremium = spec.rule === "premium";
-  const got = byPremium
-    ? pickBy(cands, c => c.premium, spec.premium, spec.match, spec.tolerance)
-    : pickBy(cands, c => c.delta, spec.delta, spec.match, spec.tolerance);
-  if (!got) return { ok: false, reason: `no ${type} quotes in the chain` };
-  const { best, fallback } = got;
-  if (!fallback) return { ok: true, ...best };
-  const wanted = byPremium
-    ? `premium ${spec.match} ${spec.premium}`
-    : `delta ${spec.match} ${spec.delta}${spec.tolerance != null ? ` ± ${spec.tolerance}` : ""}`;
-  const had = byPremium ? `premium ${best.premium.toFixed(2)}` : `delta ${best.delta.toFixed(1)}`;
-  return { ok: true, ...best, fallback: true,
-    note: `no ${type} with ${wanted} — took the nearest strike ${best.strike} (${had})` };
+  const value = byPremium ? c => c.premium : c => c.delta;
+  const target = byPremium ? spec.premium : spec.delta;
+  const best = pickBy(cands, value, target, spec.match, spec.tolerance);
+  if (best) return { ok: true, ...best };
+
+  const side = spec.match === "nearest_ge" ? " or more" : spec.match === "nearest_le" ? " or less" : "";
+  const tol = spec.tolerance != null ? ` (tolerance ${spec.tolerance})` : "";
+  const what = byPremium ? "premium" : "delta";
+  const near = neighbours(cands, value, target)
+    .map(c => `${c.strike} ${what} ${byPremium ? c.premium.toFixed(2) : c.delta.toFixed(1)}`).join(", ");
+  return { ok: false, reason: `no ${type} with ${what} ${target}${side}${tol} as the strategy file requires${near ? ` — closest: ${near}` : ""}` };
 }
 
 module.exports = { listExpiries, pickExpiry, buildChain, windowTokens, forward, selectStrike, mid, nearestStrike };
