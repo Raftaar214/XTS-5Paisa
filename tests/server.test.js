@@ -887,6 +887,21 @@ test("holidays and scheduled login are validated admin settings", async () => {
   await call("PUT", "/api/admin/settings", { token: admin, body: { autoLogin: { enabled: false } } });
 });
 
+test("admin enters an expiry close: validated, saved, and reported back", async () => {
+  const admin = await adminToken();
+  let r = await call("PUT", "/api/admin/expiry-settlement", { token: admin, body: { symbol: "NIFTY", expiry: "2026-11-17", close: -5 } });
+  assert.strictEqual(r.status, 400);
+  r = await call("PUT", "/api/admin/expiry-settlement", { token: admin, body: { symbol: "NIFTY", expiry: "17-11-2026", close: 25400 } });
+  assert.strictEqual(r.status, 400, "date must be YYYY-MM-DD");
+  r = await call("PUT", "/api/admin/expiry-settlement", { token: admin, body: { symbol: "nifty", expiry: "2026-11-17", close: 25412.35 } });
+  assert.strictEqual(r.status, 200);
+  assert.ok(Array.isArray(r.data.groups));
+  r = await call("GET", "/api/admin/expiry-settlement", { token: admin });
+  assert.strictEqual(r.data.closes["NIFTY|2026-11-17"], 25412.35);
+  const t = await userToken("bob", "bob-pw").catch(() => null);
+  if (t) assert.strictEqual((await call("GET", "/api/admin/expiry-settlement", { token: t })).status, 401, "admin only");
+});
+
 test("no order ever reached the (fake) broker", () => {
   assert.strictEqual(placeOrderCalls, 0);
 });

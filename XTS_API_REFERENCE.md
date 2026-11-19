@@ -376,6 +376,16 @@ Authorization: Bearer signed-admin-token
 
 Resetting a user's password (at least 8 characters) logs that user out; their old token gets `401` with code `PASSWORD_RESET`. Changing the admin password needs the current one (a wrong one is `400`), returns a fresh admin `token` for the console that made the change, and makes every older admin token invalid. Both are stored scrypt-hashed in `data/passwords.json` and take priority over `.env`.
 
+### Expiry Settlement
+
+```http
+GET /api/admin/expiry-settlement
+PUT /api/admin/expiry-settlement     { "symbol": "NIFTY", "expiry": "2026-11-17", "close": 25412.35 }
+Authorization: Bearer signed-admin-token
+```
+
+`GET` lists expired positions that need the underlying's expiry-day close, grouped by symbol and expiry: `waiting` (still open — the server was off at 15:30) and `provisional` (settled earlier on a price that was not the close). `PUT` saves the close (`settings.expiryCloses`) and settles / corrects them at intrinsic value; it returns `{ settled, corrected, groups }`. A correction is journaled as a trade row with status `CORRECTION` and the P&L difference.
+
 ### Margins and Trade Books
 
 ```http

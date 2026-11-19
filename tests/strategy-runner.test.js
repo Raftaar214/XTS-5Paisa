@@ -305,7 +305,7 @@ test("with no price at all, an expired position stays open (and is reported) ins
   delete quotes["99999"];
   at(EXPIRY, "15:30", 5); await runner.tick();
   assert.strictEqual(open(store.loadRun(a.id)).length, 4, "nothing settled without a price");
-  assert.ok(journal.read("events", EXPIRY, e => e.assignmentId === a.id).some(e => /Cannot settle/.test(e.message)));
+  assert.ok(journal.read("events", EXPIRY, e => e.assignmentId === a.id).some(e => /Waiting to settle/.test(e.message)));
   priceQuotes(EXPIRY);
   at(EXPIRY, "15:31"); await runner.tick();
   assert.strictEqual(open(store.loadRun(a.id)).length, 0, "settled once prices are back");
@@ -370,6 +370,68 @@ test("exchange holidays: no trading that day, and they do not count as trading d
   at(EXPIRY, "09:20", 1); await runner.tick();
   assert.strictEqual(open(store.loadRun(a.id)).length, 0, "market closed on a holiday");
   settings.holidays = [];
+  runner.stop(a.id, "nikhil"); await runner.tick();
+});
+
+test("server off at 15:30: a morning price is never used — the position waits for the close", async () => {
+  const a = setup();
+  at(EXPIRY, "09:15"); runner.start(a.id, "nikhil");
+  at(EXPIRY, "09:20", 1); await runner.tick();
+  at(EXPIRY, "09:25"); await runner.tick();                       // last mark seen at 09:25 (no entry time)
+  // the server is off until the next morning
+  at("2026-11-18", "10:00"); await runner.tick();
+  assert.strictEqual(open(store.loadRun(a.id)).length, 4, "nothing settled on the 09:25 price");
+  assert.ok(journal.read("events", "2026-11-18", e => e.assignmentId === a.id).some(e => /Waiting to settle/.test(e.message)));
+  const groups = runner.expirySettlement();
+  assert.ok(groups.some(g => g.symbol === "NIFTY" && g.expiry === EXPIRY && g.waiting === 4));
+
+  // the admin enters the NIFTY close of the expiry day: settled at intrinsic value
+  const ce = open(store.loadRun(a.id)).find(p => p.type === "CE");
+  const r = runner.applyExpiryClose("NIFTY", EXPIRY, ce.strike + 30);
+  assert.strictEqual(r.settled, 4);
+  const settled = store.loadRun(a.id).positions.find(p => p.id === ce.id);
+  assert.strictEqual(settled.exitPrice, 30);
+  assert.strictEqual(settled.settleFinal, true);
+  runner.stop(a.id, "nikhil"); await runner.tick();
+  priceQuotes(EXPIRY);
+});
+
+test("server off at 15:30 but a mark was seen at 15:25: that settles the position", async () => {
+  const a = setup();
+  at(EXPIRY, "09:15"); runner.start(a.id, "nikhil");
+  at(EXPIRY, "09:20", 1); await runner.tick();
+  at(EXPIRY, "15:25"); await runner.tick();
+  at("2026-11-18", "10:00"); await runner.tick();
+  const run = store.loadRun(a.id);
+  assert.strictEqual(open(run).length, 0);
+  assert.ok(run.positions.every(p => p.status === "EXPIRED" && p.settleFinal));
+  assert.ok(journal.read("events", "2026-11-18", e => e.assignmentId === a.id).some(e => /last price seen at 15:25/.test(e.message)));
+  runner.stop(a.id, "nikhil"); await runner.tick();
+});
+
+test("a provisional settlement (old morning price) is corrected when the close is entered", async () => {
+  const a = setup();
+  at(EXPIRY, "09:15"); runner.start(a.id, "nikhil");
+  at(EXPIRY, "09:20", 1); await runner.tick();
+  const run = store.loadRun(a.id);
+  // as it happened on 17-11: settled late at a morning price, with no close-time source
+  for (const p of open(run)) {
+    p.status = "EXPIRED"; p.exitReason = "EXPIRY"; p.exitDate = "2026-11-19"; p.exitPrice = 7.65;
+    p.pnl = Math.round((p.side === "SELL" ? p.entryPrice - 7.65 : 7.65 - p.entryPrice) * p.qty * 100) / 100;
+  }
+  store.saveRun(run);
+  assert.ok(runner.expirySettlement().some(g => g.expiry === EXPIRY && g.provisional === 4));
+
+  const ce = run.positions.find(p => p.type === "CE");
+  at("2026-11-19", "23:50");
+  const r = runner.applyExpiryClose("NIFTY", EXPIRY, ce.strike - 100);   // CE expired worthless
+  assert.strictEqual(r.corrected, 4);
+  const fixed = store.loadRun(a.id).positions.find(p => p.id === ce.id);
+  assert.strictEqual(fixed.exitPrice, 0);
+  assert.strictEqual(fixed.pnl, Math.round(fixed.entryPrice * fixed.qty * 100) / 100, "full premium kept");
+  const corrections = journal.read("trades", "2026-11-19", t => t.assignmentId === a.id && t.status === "CORRECTION");
+  assert.strictEqual(corrections.length, 4, "each correction is its own trade-book row");
+  assert.ok(!runner.expirySettlement().some(g => g.expiry === EXPIRY), "nothing left to settle");
   runner.stop(a.id, "nikhil"); await runner.tick();
 });
 

@@ -76,6 +76,9 @@ const DEFAULTS = {
   // Log in + connect every enabled client at this IST time on trading days
   // (broker session login only — never an order). Off by default.
   autoLogin: { enabled: false, time: "09:00" },
+  // Underlying close per "SYMBOL|YYYY-MM-DD" expiry, entered by the admin when
+  // the server was not running at 15:30 on expiry day (settles at intrinsic value).
+  expiryCloses: {},
 };
 
 let settings = clone(DEFAULTS);
@@ -97,6 +100,7 @@ function load() {
         limits: { ...DEFAULTS.limits, ...(raw.limits || {}) },
         holidays: Array.isArray(raw.holidays) ? raw.holidays.filter(isDate) : [],
         autoLogin: { ...DEFAULTS.autoLogin, ...(raw.autoLogin || {}) },
+        expiryCloses: raw.expiryCloses && typeof raw.expiryCloses === "object" ? raw.expiryCloses : {},
       };
       return;
     }
@@ -179,6 +183,18 @@ function updateSettings(patch = {}) {
     const al = { ...next.autoLogin, ...(patch.autoLogin || {}) };
     if (!isHhmm(al.time)) throw fail("autoLogin.time must be HH:MM (IST)");
     next.autoLogin = { enabled: Boolean(al.enabled), time: al.time };
+  }
+  if (patch.expiryCloses !== undefined) {
+    const out = { ...(next.expiryCloses || {}) };
+    for (const [key, value] of Object.entries(patch.expiryCloses || {})) {
+      const m = /^([A-Z0-9_&-]+)\|(\d{4}-\d{2}-\d{2})$/.exec(key);
+      if (!m || !isDate(m[2])) throw fail(`"${key}" must be SYMBOL|YYYY-MM-DD`);
+      if (value === null) { delete out[key]; continue; }
+      const n = Number(value);
+      if (!(n > 0 && n < 1e7)) throw fail(`The close for ${key} must be a positive price`);
+      out[key] = n;
+    }
+    next.expiryCloses = out;
   }
   if (patch.tradingHalted !== undefined) {
     next.tradingHalted = Boolean(patch.tradingHalted);

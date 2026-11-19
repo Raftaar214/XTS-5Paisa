@@ -458,7 +458,7 @@ function TradingSetup({ s, save, saving }) {
             className="mt-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-[11px] font-semibold px-3 py-1 rounded-sm">
             Save sizing
           </button>
-          <div className="text-[9px] text-gray-500 mt-2">Strategies can also allocate capital per client (Strategies > assignment > Allocations).</div>
+          <div className="text-[9px] text-gray-500 mt-2">Strategies can also allocate capital per client (Strategies tab, then Allocations on an assignment).</div>
         </div>
       </div>
 

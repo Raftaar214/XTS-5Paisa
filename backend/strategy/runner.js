@@ -180,20 +180,97 @@ function createRunner(deps) {
   //   2. intrinsic value from the underlying futures price (CE: F-K, PE: K-F);
   //   3. the last good price seen on expiry day;
   //   4. nothing -> keep it open and try again (never settle at 0 by default).
+  // Settlement must reflect the expiry-day CLOSE. Sources, best first:
+  //   on expiry day (at / after 15:30): the option's own last traded price,
+  //     else intrinsic value from the futures price;
+  //   a mark the runner saw at or after 15:20 on expiry day;
+  //   the underlying's close entered by the admin (Admin > Strategies >
+  //     Expiry settlement) -> intrinsic value;
+  //   otherwise nothing: the position waits (a morning price, or a later
+  //     day's price, is never used — it is not the expiry close).
+  const LATE_MARK_FROM = "15:20";
+  const intrinsicOf = (pos, close) => round2(Math.max(0, pos.type === "CE" ? close - Number(pos.strike) : Number(pos.strike) - close));
+  const closeKey = (symbol, expiry) => `${symbol}|${expiry}`;
+  const enteredClose = pos => Number(((getSettings() || {}).expiryCloses || {})[closeKey(pos.symbol, pos.expiry)] || 0);
+
   function settlementPrice(pos, quotes, p) {
-    const live = Number(quotes[pos.token]?.ltp || 0);
-    if (live > 0) return { price: live, how: "last traded price" };
-    const chain = chainFor({ underlying: pos.symbol, segment: pos.segment }, pos.expiry, pos.expiry);
-    const fq = chain.future ? quotes[chain.future.token] : null;
-    const F = chainLib.mid(fq) || Number(fq?.ltp || 0);
-    if (F > 0) {
-      const k = Number(pos.strike);
-      const intrinsic = Math.max(0, pos.type === "CE" ? F - k : k - F);
-      return { price: round2(intrinsic), how: pos.expiry === p.date ? "intrinsic value from the futures price" : "approximate intrinsic value (settled late)" };
+    if (p.date === pos.expiry) {
+      const live = isFresh(pos.token, QUOTE_MAX_AGE_MS) ? Number(quotes[pos.token]?.ltp || 0) : 0;
+      if (live > 0) return { price: live, how: "last traded price at the close", final: true };
+      const chain = chainFor({ underlying: pos.symbol, segment: pos.segment }, pos.expiry, pos.expiry);
+      const fq = chain.future && isFresh(chain.future.token, QUOTE_MAX_AGE_MS) ? quotes[chain.future.token] : null;
+      const F = chainLib.mid(fq) || Number(fq?.ltp || 0);
+      if (F > 0) return { price: intrinsicOf(pos, F), how: "intrinsic value from the futures price at the close", final: true };
+      if (chain.future) ensureSubscribed({ id: `settle:${pos.symbol}` }, [chain.future.token], pos.segment).catch(() => {});
     }
-    if (pos.lastPrice > 0 && pos.lastPriceDate === pos.expiry) return { price: pos.lastPrice, how: "last price seen on expiry day" };
-    if (chain.future) ensureSubscribed({ id: `settle:${pos.symbol}` }, [chain.future.token], pos.segment).catch(() => {});
+    if (pos.lastPrice > 0 && pos.lastPriceDate === pos.expiry && Number(pos.lastPriceAt || 0) >= ist.timeOn(pos.expiry, LATE_MARK_FROM)) {
+      return { price: pos.lastPrice, how: `last price seen at ${ist.parts(pos.lastPriceAt).hhmm} on expiry day`, final: true };
+    }
+    const close = enteredClose(pos);
+    if (close > 0) return { price: intrinsicOf(pos, close), how: `intrinsic value from the entered ${pos.symbol} close ${close}`, final: true };
     return null;
+  }
+
+  // The admin entered the underlying's close for a symbol and expiry: settle
+  // what is waiting, and correct positions settled before on a provisional
+  // price (no close-time source). A correction is journaled as its own trade
+  // row (status CORRECTION, pnl = the difference), so totals stay right.
+  function applyExpiryClose(symbol, expiry, close) {
+    const out = { settled: 0, corrected: 0 };
+    const t = now();
+    for (const a of store.listAssignments()) {
+      const run = store.loadRun(a.id);
+      const s = store.getStrategy(a.strategyId);
+      let changed = false;
+      for (const pos of run.positions) {
+        if (pos.symbol !== symbol || pos.expiry !== expiry) continue;
+        const price = intrinsicOf(pos, close);
+        if (isOpen(pos) && (expiry < ist.parts(t).date || ist.parts(t).minutes >= ist.MARKET_CLOSE)) {
+          closePosition(a, s, run, pos, price, "EXPIRY");
+          pos.settleHow = `entered close ${close}`; pos.settleFinal = true;
+          event(a, s, "info", `Expiry: ${pos.client} ${pos.tradingSymbol} settled at ${price} (intrinsic value from the entered ${symbol} close ${close})`);
+          out.settled++; changed = true;
+        } else if (pos.status === "EXPIRED" && !pos.settleFinal) {
+          const oldPrice = pos.exitPrice, oldPnl = Number(pos.pnl || 0);
+          pos.exitPrice = price;
+          pos.pnl = pnlOf(pos, price);
+          pos.settleHow = `corrected to entered close ${close}`; pos.settleFinal = true;
+          journal.appendTrade({
+            source: "STRATEGY", mode: pos.mode, user: a.username, strategy: s?.name, assignmentId: a.id,
+            symbol: pos.symbol, client: pos.client, clientName: pos.clientName, tradingSymbol: pos.tradingSymbol,
+            token: pos.token, side: pos.side === "SELL" ? "BUY" : "SELL", qty: pos.qty, price,
+            reason: "EXPIRY_CORRECTION", status: "CORRECTION", pnl: round2(pos.pnl - oldPnl),
+          }, t);
+          event(a, s, "warn", `Expiry correction: ${pos.client} ${pos.tradingSymbol} settlement ${oldPrice} -> ${price} (${symbol} close ${close}); P&L ${oldPnl} -> ${pos.pnl}`);
+          out.corrected++; changed = true;
+        }
+      }
+      if (changed) store.saveRun(run);
+    }
+    return out;
+  }
+
+  // Expired positions that need the admin's close: waiting (still open past
+  // expiry) or settled on a provisional price.
+  function expirySettlement() {
+    const t = now();
+    const today = ist.parts(t).date, minutes = ist.parts(t).minutes;
+    const groups = new Map();
+    for (const a of store.listAssignments()) {
+      for (const pos of store.loadRun(a.id).positions) {
+        const pastClose = pos.expiry < today || (pos.expiry === today && minutes >= ist.MARKET_CLOSE);
+        const waiting = isOpen(pos) && pastClose;
+        const provisional = pos.status === "EXPIRED" && !pos.settleFinal;
+        if (!waiting && !provisional) continue;
+        const key = closeKey(pos.symbol, pos.expiry);
+        if (!groups.has(key)) groups.set(key, { symbol: pos.symbol, expiry: pos.expiry, waiting: 0, provisional: 0, positions: [] });
+        const g = groups.get(key);
+        if (waiting) g.waiting++; else g.provisional++;
+        g.positions.push({ assignmentId: a.id, client: pos.client, tradingSymbol: pos.tradingSymbol, side: pos.side, qty: pos.qty,
+          entryPrice: pos.entryPrice, exitPrice: pos.exitPrice ?? null, pnl: pos.pnl ?? null, status: waiting ? "WAITING" : "PROVISIONAL" });
+      }
+    }
+    return [...groups.values()];
   }
 
   function settleExpired(a, s, run, p) {
@@ -206,10 +283,11 @@ function createRunner(deps) {
       const sp = settlementPrice(pos, quotes, p);
       if (!sp) {
         eventOnce(`settle:${pos.id}`, 10 * 60_000, a, s, "warn",
-          `Cannot settle ${pos.client} ${pos.tradingSymbol} yet — no price for the option or its future; trying again`);
+          `Waiting to settle ${pos.client} ${pos.tradingSymbol}: no price from the ${pos.expiry} close — enter the ${pos.symbol} close in Admin > Strategies > Expiry settlement`);
         continue;
       }
       closePosition(a, s, run, pos, sp.price, "EXPIRY");
+      pos.settleHow = sp.how; pos.settleFinal = !!sp.final;
       event(a, s, "info", `Expiry: ${pos.client} ${pos.tradingSymbol} settled at ${sp.price} (${sp.how})`);
       changed = true;
     }
@@ -298,7 +376,7 @@ function createRunner(deps) {
     for (const pos of run.positions) {
       if (!isOpen(pos)) continue;
       const m = markOf(quotes, pos.token);
-      if (m > 0) { pos.lastPrice = round2(m); pos.lastPriceDate = p.date; }
+      if (m > 0) { pos.lastPrice = round2(m); pos.lastPriceDate = p.date; pos.lastPriceAt = t; }
     }
 
     for (const pos of ready) {
@@ -747,7 +825,7 @@ function createRunner(deps) {
     };
   }
 
-  return { tick, start, stop, squareOff, resume, pauseForClient, init, status };
+  return { tick, start, stop, squareOff, resume, pauseForClient, init, status, applyExpiryClose, expirySettlement };
 }
 
 module.exports = { createRunner };

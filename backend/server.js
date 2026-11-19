@@ -553,6 +553,21 @@ admin.delete("/sessions/:username", (req, res) => {
   res.json({ success: true, ended });
 });
 
+// Expiry settlement: positions that need the underlying's expiry-day close
+// (server was off at 15:30), and entering that close (settles / corrects).
+admin.get("/expiry-settlement", (_, res) => res.json({ groups: runner.expirySettlement(), closes: settings.getSettings().expiryCloses || {} }));
+admin.put("/expiry-settlement", (req, res) => {
+  const symbol = String(req.body?.symbol || "").toUpperCase();
+  const expiry = String(req.body?.expiry || "");
+  const close = Number(req.body?.close);
+  try {
+    settings.updateSettings({ expiryCloses: { [`${symbol}|${expiry}`]: close } });
+  } catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+  const r = runner.applyExpiryClose(symbol, expiry, close);
+  monitor.recordAudit(actor(req), "Entered expiry close", `${symbol} ${expiry} close ${close}: ${r.settled} settled, ${r.corrected} corrected`);
+  res.json({ success: true, ...r, groups: runner.expirySettlement() });
+});
+
 // Users tab: who is logged in, and password resets. Passwords are never returned.
 admin.get("/accounts", (_, res) => res.json({ users: auth.listAccounts(), minPasswordLength: auth.MIN_PASSWORD }));
 admin.put("/accounts/:username/password", (req, res) => {

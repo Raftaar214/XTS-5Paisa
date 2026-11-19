@@ -206,6 +206,90 @@ function AllocationSummary({ assignments, clients }) {
   );
 }
 
+// Positions that expired while the server was off at 15:30: they wait for
+// the underlying's close of that expiry day (or were settled on a provisional
+// price). Entering the close settles / corrects them at intrinsic value.
+function ExpirySettlement() {
+  const [data, setData] = useState(null);
+  const [vals, setVals] = useState({});
+  const [busy, setBusy] = useState("");
+  const [msg, setMsg] = useState(null);
+
+  const load = useCallback(async () => {
+    try { setData(await adminFetch("/api/admin/expiry-settlement")); } catch (e) { setMsg({ ok: false, text: e.message }); }
+  }, []);
+  useEffect(() => { load(); const id = setInterval(load, 15000); return () => clearInterval(id); }, [load]);
+
+  if (!data || (!data.groups.length && !msg)) return null;
+  if (!data.groups.length) {
+    return <div className={`text-[11px] px-3 py-2 rounded border ${msg.ok ? "text-emerald-300 border-emerald-500/40 bg-emerald-500/10" : "text-red-400 border-red-500/40 bg-red-500/10"}`}>{msg.text}</div>;
+  }
+  const save = async g => {
+    const key = `${g.symbol}|${g.expiry}`;
+    const close = Number(vals[key]);
+    if (!(close > 0)) return setMsg({ ok: false, text: `Enter the ${g.symbol} close for ${g.expiry}` });
+    if (!window.confirm(`Settle ${g.symbol} ${g.expiry} positions at intrinsic value from a close of ${close}?\n\n${g.waiting} waiting, ${g.provisional} to correct.`)) return;
+    setBusy(key); setMsg(null);
+    try {
+      const r = await adminFetch("/api/admin/expiry-settlement", { method: "PUT", body: { symbol: g.symbol, expiry: g.expiry, close } });
+      setMsg({ ok: true, text: `${g.symbol} ${g.expiry}: ${r.settled} settled, ${r.corrected} corrected.` });
+      setData(d => ({ ...d, groups: r.groups }));
+    } catch (e) { setMsg({ ok: false, text: e.message }); }
+    setBusy("");
+  };
+
+  return (
+    <div className="bg-[#1e2329] border border-amber-500/40 rounded">
+      <div className="px-3 py-1.5 border-b border-gray-700 text-[11px] font-bold text-amber-300">
+        Expiry settlement <span className="font-normal text-gray-400">— the server was not running at 15:30 on these expiry days</span>
+      </div>
+      <div className="p-3 space-y-3">
+        <div className="text-[10px] text-gray-400">
+          Enter the underlying's closing value on the expiry day (for index options, the index close). Positions are settled at intrinsic value: CE = close − strike, PE = strike − close, never below 0. "Provisional" ones were settled earlier on a price that was not the close and are corrected.
+        </div>
+        {data.groups.map(g => {
+          const key = `${g.symbol}|${g.expiry}`;
+          return (
+            <div key={key} className="border border-gray-700 rounded px-3 py-2">
+              <div className="flex flex-wrap items-end gap-2 mb-2">
+                <div className="text-[11px] text-white font-semibold mr-2">{g.symbol} expiry {g.expiry}
+                  <span className="font-normal text-gray-400"> · {g.waiting} waiting · {g.provisional} provisional</span></div>
+                <label className="text-[10px] text-gray-400">{g.symbol} close on {g.expiry}<br />
+                  <input type="number" step="0.05" min="0" value={vals[key] ?? (data.closes?.[key] ?? "")}
+                    onChange={e => setVals(v => ({ ...v, [key]: e.target.value }))}
+                    className="bg-[#161a1f] border border-gray-600 text-white text-[12px] px-2 py-1 rounded-sm w-[150px]" />
+                </label>
+                <button disabled={busy === key} onClick={() => save(g)}
+                  className="bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white text-[11px] font-semibold px-3 py-1.5 rounded-sm">
+                  {busy === key ? "Saving…" : "Settle at this close"}
+                </button>
+              </div>
+              <table className="w-full text-left text-[10px]">
+                <thead><tr className="text-gray-500 uppercase text-[9px]">{["Client", "Instrument", "Side", "Qty", "Entry", "Settled at", "P&L", "Status"].map(h => <th key={h} className="px-2 py-1">{h}</th>)}</tr></thead>
+                <tbody>
+                  {g.positions.map((p, i) => (
+                    <tr key={i} className="border-t border-gray-800">
+                      <td className="px-2 py-1 text-gray-300">{p.client}</td>
+                      <td className="px-2 py-1 text-gray-200">{p.tradingSymbol}</td>
+                      <td className="px-2 py-1 text-gray-300">{p.side}</td>
+                      <td className="px-2 py-1 text-gray-300">{p.qty}</td>
+                      <td className="px-2 py-1 text-gray-300">{p.entryPrice}</td>
+                      <td className="px-2 py-1 text-gray-300">{p.exitPrice ?? "—"}</td>
+                      <td className="px-2 py-1 text-gray-300">{p.pnl ?? "—"}</td>
+                      <td className={`px-2 py-1 font-semibold ${p.status === "WAITING" ? "text-amber-300" : "text-sky-300"}`}>{p.status === "WAITING" ? "Waiting" : "Provisional"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        })}
+        {msg && <div className={`text-[11px] ${msg.ok ? "text-emerald-400" : "text-red-400"}`}>{msg.text}</div>}
+      </div>
+    </div>
+  );
+}
+
 export default function AdminStrategies() {
   const [strategies, setStrategies] = useState([]);
   const [assignments, setAssignments] = useState([]);
@@ -369,6 +453,8 @@ export default function AdminStrategies() {
           )}
         </div>
       </div>
+
+      <ExpirySettlement />
 
       <AllocationSummary assignments={assignments} clients={clients} />
 
